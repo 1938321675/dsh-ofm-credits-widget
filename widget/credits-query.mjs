@@ -341,7 +341,7 @@ async function main() {
     if (row.total != null) {
       const prev = lastTotals[row.provider];
       const delta = typeof prev === 'number' ? Math.max(0, prev - row.total) : 0;
-      daily.totals[row.provider] = Math.round((daily.totals[row.provider] || 0 + delta) * 100) / 100;
+      daily.totals[row.provider] = Math.round(((daily.totals[row.provider] || 0) + delta) * 100) / 100;
       row.todayConsumed = daily.totals[row.provider];
     } else {
       row.todayConsumed = daily.totals[row.provider] || 0;
