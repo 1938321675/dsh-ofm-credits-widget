@@ -180,7 +180,8 @@ window.__ModuleLoader__.load({
     function tooltipOf(row) {
       let tip = row.account || ''
       if (Array.isArray(row.packages) && row.packages.length) {
-        tip += '\n' + row.packages.map(p => {
+        const visiblePackages = row.packages.filter(p => (p.remaining || 0) > 0)
+        tip += '\n' + visiblePackages.map(p => {
           const exp = p.expireAt ? ` 过期：${p.expireAt}` : ''
           return `${p.name}: ${Math.round(p.remaining)}${exp}`
         }).join('\n')
