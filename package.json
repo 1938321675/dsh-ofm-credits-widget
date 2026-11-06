@@ -1,0 +1,23 @@
+{
+  "name": "dsh-ofm-credits-widget",
+  "version": "0.2.0",
+  "description": "OFM 渠道积分卡片：DSH 主界面内嵌卡片，显示各渠道剩余额度与消耗，可拖动、可配置隐藏",
+  "main": "./index.js",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "license": "MIT"
+}

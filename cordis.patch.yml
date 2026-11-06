@@ -1,0 +1,7 @@
+# dsh-ofm-credits-widget bundle patch.
+#
+# 一行 insert 即挂载插件本体（无浏览器半身，纯 Host 生命周期钩子）。
+- insert:
+    - id: ofm-credits-widget
+      name: 'dsh-ofm-credits-widget'
+      config: {}
