@@ -60,10 +60,18 @@ window.__ModuleLoader__.load({
       if (unit === 'tokens') {
         if (abs >= 1e6) return (value / 1e6).toFixed(1) + 'M'
         if (abs >= 1000) return (value / 1000).toFixed(1) + 'K'
-        return Math.round(value).toString()
+        return formatCredit(value)
       }
       if (abs >= 10000) return (value / 1000).toFixed(1) + 'K'
-      return Math.round(value).toString()
+      return formatCredit(value)
+    }
+
+    function formatCredit(value) {
+      if (Number.isInteger(value)) return value.toString()
+      let s = value.toFixed(2)
+      s = s.replace(/(\.\d*?[1-9])0+$/, '$1')
+      s = s.replace(/\.0+$/, '')
+      return s
     }
 
     function totalColor(row) {
