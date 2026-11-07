@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "OFM Credit Watch",
+    "description": "A draggable floating panel that watches the remaining credits of every EAC router channel in Our Free Model: refreshed once a minute, showing the current balance, what this minute consumed and the running total for today, with channels that spent most recently sorted first. Hover a channel name for its accounts and package breakdown (remaining/total/expiry), and balances are colour-coded by unit. Position is stored relative to the bottom-right, and unused channels can be hidden to make the panel shorter."
+  }
+}

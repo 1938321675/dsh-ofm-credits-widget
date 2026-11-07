@@ -1,14 +1,30 @@
 {
-  "name": "dsh-ofm-credits-widget",
-  "version": "0.2.0",
-  "description": "OFM 渠道积分卡片：DSH 主界面内嵌卡片，显示各渠道剩余额度与消耗，可拖动、可配置隐藏",
-  "main": "./index.js",
+  "name": "dsh-ofm-credit-watch",
+  "version": "1.2.0",
+  "private": true,
   "type": "module",
+  "description": "悬浮监控 Our Free Model（OFM）EAC router 各渠道的剩余积分：每分钟刷新一次，显示当前剩余、本分钟消耗与当日累计消耗，按最近有消耗的渠道置顶，窗口可自由拖动；鼠标悬停渠道名可看各积分包构成与过期时间，按单位（积分/美元/token/百分比）分级告警；可勾选隐藏用不上的渠道来收窄窗口。",
+  "icon": "icon.svg",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
     "./package.json": "./package.json",
-    "./cordis.patch.yml": "./cordis.patch.yml"
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "selftest.cjs",
+    "rendertest.cjs",
+    "ledgertest.mjs",
+    "routetest.mjs"
+  ],
+  "scripts": {
+    "test": "node selftest.cjs && node rendertest.cjs && node ledgertest.mjs && node routetest.mjs"
   },
   "dsh": {
     "bundle": {
@@ -16,8 +32,10 @@
     },
     "client": {
       "platform": "web",
-      "inject": []
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-connection"
+      ]
     }
-  },
-  "license": "MIT"
+  }
 }

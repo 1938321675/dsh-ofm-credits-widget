@@ -3,10 +3,6 @@
 lifecycle.log
 spawn-stderr.log
 
-# 运行时位置与状态（用户本地专属，不应上传）
-widget/widget-pos.json
-widget/credits-widget.lnk
-
 # 系统文件
 .DS_Store
 Thumbs.db

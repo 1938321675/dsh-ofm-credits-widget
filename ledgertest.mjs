@@ -1,0 +1,198 @@
+/**
+ * 账本自测：验证 index.js 里「当日累计消耗」的记账规则。
+ *
+ * 先把 OFM_CREDIT_WATCH_DIR 指到系统临时目录，再动态 import index.js——
+ * 账本目录是惰性求值的，这样测试永远不会碰用户真实的当日账本。
+ *
+ * 测的是最容易错、又最难在界面上看出来的几条：
+ *   - 余额下降才计入，领积分/充值不算负消耗；
+ *   - 查询失败不动基准（否则一次上游抖动会被记成花光了）；
+ *   - 基准太旧或跨天时不记账，只更新基准；
+ *   - 两个窗口先后报同一轮读数，只记一次（幂等）。
+ */
+
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ofm-credit-watch-test-'))
+process.env.OFM_CREDIT_WATCH_DIR = temp
+
+const failures = []
+let checks = 0
+function check(name, actual, expected) {
+  checks += 1
+  const a = JSON.stringify(actual)
+  const e = JSON.stringify(expected)
+  if (a !== e) failures.push(`${name}: 期望 ${e}，实际 ${a}`)
+}
+function checkTrue(name, value) {
+  checks += 1
+  if (!value) failures.push(`${name}: 期望真值，实际 ${JSON.stringify(value)}`)
+}
+
+/** 每一节用独立目录，避免上一节的基准影响下一节。 */
+let sectionDir = 0
+function freshDir() {
+  sectionDir += 1
+  const dir = path.join(temp, `case-${sectionDir}`)
+  fs.mkdirSync(dir, { recursive: true })
+  process.env.OFM_CREDIT_WATCH_DIR = dir
+  return dir
+}
+
+/** 直接写基准文件，模拟"上一轮采样"的各种状态。 */
+function seedLast(dir, totals, extra = {}) {
+  const date = extra.date ?? new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' })
+  const at = extra.at ?? Date.now()
+  fs.writeFileSync(path.join(dir, 'last.json'),
+    JSON.stringify({ at, date, totals }, null, 2), 'utf8')
+}
+
+async function main() {
+  const mod = await import(new URL('./index.js', import.meta.url).href)
+  const t = mod.__test
+
+  // ── 1. 正常下降记入当日 ────────────────────────────────────────────────
+  {
+    const dir = freshDir()
+    seedLast(dir, { qoder: 3000 })
+
+    const out = t.commitReadings([{ provider: 'qoder', total: 2870 }])
+    check('下降 130 记入当日', out.totals.qoder, 130)
+    check('本次 delta 为 130', out.deltas.qoder, 130)
+
+    const second = t.commitReadings([{ provider: 'qoder', total: 2870 }])
+    check('余额不变不再累加', second.totals.qoder, 130)
+    check('余额不变 delta 为 0', second.deltas.qoder, 0)
+  }
+
+  // ── 2. 余额回升不算负消耗 ──────────────────────────────────────────────
+  {
+    const dir = freshDir()
+    seedLast(dir, { qoder: 1000 })
+    const out = t.commitReadings([{ provider: 'qoder', total: 1800 }])
+    check('领积分回升不计消耗', out.totals.qoder, undefined)
+    check('回升 delta 为 0', out.deltas.qoder, 0)
+    checkTrue('回升后基准被更新', (() => {
+      const last = JSON.parse(fs.readFileSync(path.join(dir, 'last.json'), 'utf8'))
+      return last.totals.qoder === 1800
+    })())
+  }
+
+  // ── 3. 查询失败不动基准 ────────────────────────────────────────────────
+  {
+    const dir = freshDir()
+    seedLast(dir, { trae: 5000 })
+    const out = t.commitReadings([{ provider: 'trae', total: null }])
+    check('失败不计消耗', out.totals.trae, undefined)
+    checkTrue('失败不覆盖基准', (() => {
+      const last = JSON.parse(fs.readFileSync(path.join(dir, 'last.json'), 'utf8'))
+      return last.totals.trae === 5000
+    })())
+  }
+
+  // ── 4. 跨天不把昨天的账记到今天 ────────────────────────────────────────
+  {
+    const dir = freshDir()
+    // 基准来自昨天：23:59 采到 1000，00:01 采到 900，这 100 属于昨天。
+    seedLast(dir, { cline: 1000 }, { date: '2000-01-01' })
+    const out = t.commitReadings([{ provider: 'cline', total: 900 }])
+    check('跨天差值不计入今天', out.totals.cline, undefined)
+    check('跨天 delta 为 0', out.deltas.cline, 0)
+    checkTrue('跨天后基准日期更新', (() => {
+      const last = JSON.parse(fs.readFileSync(path.join(dir, 'last.json'), 'utf8'))
+      return last.date === t.todayKey()
+    })())
+  }
+
+  // ── 5. 基准过旧同样不记账 ──────────────────────────────────────────────
+  {
+    const dir = freshDir()
+    // 三小时前采样：中间可能关了一晚上 DSH，差值归属不明。
+    seedLast(dir, { minimax: 2000 }, { at: Date.now() - 3 * 60 * 60 * 1000 })
+    const out = t.commitReadings([{ provider: 'minimax', total: 1500 }])
+    check('过旧基准不计入', out.totals.minimax, undefined)
+    checkTrue('过旧基准被刷新', (() => {
+      const last = JSON.parse(fs.readFileSync(path.join(dir, 'last.json'), 'utf8'))
+      return last.totals.minimax === 1500 && Date.now() - last.at < 60_000
+    })())
+  }
+
+  // ── 6. 幂等：两个窗口报同一轮读数只记一次 ──────────────────────────────
+  {
+    const dir = freshDir()
+    seedLast(dir, { zcode: 8000 })
+    const first = t.commitReadings([{ provider: 'zcode', total: 7000 }])
+    const second = t.commitReadings([{ provider: 'zcode', total: 7000 }])
+    check('第一个窗口记 1000', first.totals.zcode, 1000)
+    check('第二个窗口不再重复记', second.totals.zcode, 1000)
+    check('第二个窗口 delta 为 0', second.deltas.zcode, 0)
+  }
+
+  // ── 7. 当日累计跨轮累加 ────────────────────────────────────────────────
+  {
+    const dir = freshDir()
+    seedLast(dir, { loomy: 500 })
+    t.commitReadings([{ provider: 'loomy', total: 400 }])
+    const out = t.commitReadings([{ provider: 'loomy', total: 350 }])
+    check('两轮累加 100+50', out.totals.loomy, 150)
+  }
+
+  // ── 8. 读账本快照 ──────────────────────────────────────────────────────
+  {
+    const dir = freshDir()
+    seedLast(dir, { qoder: 100 })
+    t.commitReadings([{ provider: 'qoder', total: 60 }])
+    const snapshot = t.readLedger()
+    check('快照带当日日期', snapshot.date, t.todayKey())
+    check('快照带当日累计', snapshot.totals.qoder, 40)
+    checkTrue('快照带基准时间', typeof snapshot.at === 'string' && snapshot.at.length > 0)
+  }
+
+  // ── 9. 脏数据不炸 ──────────────────────────────────────────────────────
+  {
+    const dir = freshDir()
+    fs.writeFileSync(path.join(dir, 'last.json'), '{ 这不是 JSON', 'utf8')
+    const out = t.commitReadings([{ provider: 'qoder', total: 100 }])
+    check('坏基准文件当没有基准', out.deltas.qoder, 0)
+    checkTrue('坏基准被正常覆盖', (() => {
+      const last = JSON.parse(fs.readFileSync(path.join(dir, 'last.json'), 'utf8'))
+      return last.totals.qoder === 100
+    })())
+
+    const dir2 = freshDir()
+    const dailyDate = t.todayKey()
+    fs.writeFileSync(path.join(dir2, `daily-${dailyDate}.json`), 'null', 'utf8')
+    const out2 = t.commitReadings([{ provider: 'trae', total: 100 }])
+    checkTrue('坏当日账本不抛错', out2 && typeof out2.totals === 'object')
+  }
+
+  // ── 10. 未知形状的读数被忽略 ───────────────────────────────────────────
+  {
+    const dir = freshDir()
+    seedLast(dir, { qoder: 100 })
+    const out = t.commitReadings([
+      null,
+      { provider: 42, total: 5 },
+      { provider: 'qoder', total: 80 },
+    ])
+    check('坏条目被跳过、好条目照算', out.totals.qoder, 20)
+  }
+
+  if (failures.length > 0) {
+    console.error(`✗ ${failures.length}/${checks} 项失败`)
+    for (const line of failures) console.error('  - ' + line)
+    process.exitCode = 1
+  } else {
+    console.log(`✓ ${checks} 项账本检查全部通过`)
+  }
+  fs.rmSync(temp, { recursive: true, force: true })
+}
+
+main().catch(error => {
+  console.error('自测异常：', error)
+  fs.rmSync(temp, { recursive: true, force: true })
+  process.exit(1)
+})

@@ -1,36 +1,87 @@
-# dsh-ofm-credits-widget
+# dsh-ofm-credit-watch
 
-DSH 本地自研插件，在主界面右下角嵌入 OFM 渠道积分卡片，显示各 AI 渠道剩余额度与当日消耗，支持按渠道隐藏显示。
+悬浮监控 Our Free Model（OFM）EAC router 各渠道剩余积分的 DSH 插件。
+
+在主界面右上角嵌入一个可拖动的悬浮卡片，每分钟刷新一次，显示每个渠道的剩余额度、
+本分钟消耗与当日累计消耗。最近有消耗的渠道排在最前面。
+
+> 本仓库由 `dsh-ofm-credit-watch` 与早期的 `dsh-ofm-credits-widget` 合并而来。
+> 前者是现在的实现：走 OFM 自己的 channel-pack 通道取数，不复制上游逻辑；
+> 后者是一个自带查询脚本与 PowerShell 悬浮窗的早期版本，已在本版本移除。
 
 ## 功能
 
-- 卡片显示每个渠道的剩余额度、本次消耗量（相对上次刷新）和当日累计消耗
-- 活跃渠道（有消耗的）排在前面
-- 鼠标指向渠道名，tooltip 显示账号和各积分包构成（剩余/总额）
-- 设置按钮可勾选要显示的渠道，配置持久化到浏览器 localStorage
-- 卡片可拖动，默认贴在 DSH 窗口右下角，随 DSH 移动而跟随
-- 每 60 秒自动刷新，也可通过托盘图标手动立即刷新
+- **剩余额度**：每个渠道一行，按单位格式化（积分 / 美元 / token / 百分比）
+- **本分钟消耗**：本轮快照与上一轮快照相减，只在余额下降时显示
+- **当日累计消耗**：由 Host 落盘累计，跨天自动重置，换浏览器也接着记账
+- **活跃优先排序**：五分钟内有过消耗的渠道置顶，其余按余额从多到少
+- **积分包构成**：悬停渠道名看每个账号下各积分包（套餐 / 资源包 / 每日赠送）的
+  剩余、总额与过期时间
+- **分级告警色**：余额偏低转黄（token < 10 万、美元 < $0.5、积分 < 500、配额 < 20%），
+  归零或更少转红
+- **失败降级**：某个渠道查询失败时保留上一次的读数并标记失败，不让整片变空
+- **可配置显示**：勾选隐藏用不上的渠道，悬浮窗随之变矮
+- **位置记忆**：位置相对右下角保存，窗口缩放后自动贴回
 
 ## 支持的渠道
 
-| 渠道 | 标签 | 单位 |
+| 渠道 | provider id | 单位 |
+|------|-------------|------|
+| Qoder | `qoder` | credits |
+| Qoder 中国版 | `qodercn` | credits |
+| TRAE | `trae` | credits |
+| Cline | `cline` | USD |
+| Loomy | `loomy` | credits |
+| Raccoon | `raccoon` | credits |
+| MiniMax Code | `minimax` | credits |
+| ZCode | `zcode` | token |
+| LobsterAI | `lobsterai` | credits |
+| Gemini | `gemini` | % |
+
+## 架构
+
+两半各司其职，界线是「浏览器做不了什么」：
+
+### 浏览器半身（`client.js`）
+
+渲染与查询都在这里。它挂在 DSH 的 `shell.overlay` 悬浮层上，通过 OFM 已经注册的
+`channel-pack` 通道（`connection.rpc.call(conn.rpc, '/api', 'channel-pack', ...)`）
+查询 `credits.balances`。
+
+**为什么不自己抓上游**：凭据解析、响应缓存与失败分类都由 channel-pack 负责，
+再抄一份端点与鉴权逻辑，等于在 OFM 升级时给自己埋一个静默漂移。
+
+### Host 半身（`index.js`）
+
+只做一件浏览器做不了的事：**当日累计消耗的账本**。
+
+注册 `/api/ofm-credit-watch/*` 路由：
+
+| 方法 | 路径 | 作用 |
 |------|------|------|
-| Qoder | Qoder | credits |
-| Qoder 中国版 | Qoder 中国版 | credits |
-| TRAE | TRAE | credits |
-| Cline | Cline | USD |
-| Loomy | Loomy | credits |
-| Raccoon | Raccoon | credits |
-| MiniMax Code | MiniMax Code | credits |
-| ZCode | ZCode | tokens |
-| LobsterAI | LobsterAI | credits |
+| GET | `/api/ofm-credit-watch/ledger` | 读当前账本（今日累计 + 基准时间） |
+| POST | `/api/ofm-credit-watch/ledger` | 报一轮读数 `{ readings: [{provider, total}] }`，返回累加后的今日累计 |
+| GET | `/api/ofm-credit-watch/ping` | 健康检查 |
 
-## 数据来源
+**为什么差值必须由 Host 算**：同时开两个窗口时，让浏览器各自算差值会把同一笔消耗
+记两遍。放在 Host 上，先到的请求把基准推到最新、后到的自然得到 0 差值，天然幂等。
 
-查询脚本 `widget/credits-query.mjs` 与 `dsh-our-free-model` 插件的 `channel-pack/credits.balances` 数据源同源：
-- 凭据读取 `~/.dsh/.credentials.yaml`
-- 账号读取 `~/.dsh/channel-pack/state.json`
-- 直连各渠道余额 API
+**两条不记账的规则**（宁可少记，不要凭空记账）：
+
+1. 基准距上次采样超过两小时 —— 差值归属不明（可能是关了一晚上 DSH）
+2. 基准跨了一天 —— 23:59 采到 1000、00:01 采到 900，那 100 是昨天的账
+
+两种情况下只更新基准，不累加。
+
+### 数据目录
+
+`$DSH_HOME/ofm-credit-watch/`：
+
+- `daily-YYYY-MM-DD.json` 当日累计，跨天自动换文件
+- `last.json` 上次采样的余额基准与日期
+
+Host 不可用时（路由 404），浏览器退到 `localStorage` 的本地兜底账本。这只是降级：
+换浏览器或清缓存后会从头开始。
 
 ## 安装
 
@@ -38,25 +89,31 @@ DSH 本地自研插件，在主界面右下角嵌入 OFM 渠道积分卡片，�
 
 ```yaml
 - insert:
-    - id: ofm-credits-widget
-      name: 'dsh-ofm-credits-widget'
+    - id: ofm-credit-watch
+      name: 'dsh-ofm-credit-watch'
       config: {}
 ```
 
-将插件目录放到 `~/.dsh/ofm-widget-plugin`，DSH 启动时自动加载。
+把插件目录放到 profile 的 `node_modules/` 下（或做成 junction 指向源码目录），
+DSH 启动时自动加载。
 
-## 文件说明
+## 测试
 
-| 文件 | 作用 |
+```bash
+npm test
+```
+
+四套离线测试，共 200 项检查：
+
+| 文件 | 覆盖 |
 |------|------|
-| `package.json` | 插件清单，name 为 `dsh-ofm-credits-widget` |
-| `index.js` | 宿主半身，注册 `/api/ofm-credits/*` 查询路由 |
-| `client.js` | 浏览器半身，React 渲染积分卡片 |
-| `cordis.patch.yml` | Cordis bundle patch，挂载插件 |
-| `widget/credits-query.mjs` | 查询各渠道余额的 Node 脚本 |
-| `widget/credits-widget.ps1` | 独立 PowerShell 悬浮窗（旧形态） |
-| `widget/credits-widget.lnk` | 悬浮窗快捷方式 |
+| `selftest.cjs` | 格式化、单位识别、告警档位、过期时间、readChannel 归一、tooltip、位置解算、本地账本 |
+| `rendertest.cjs` | 组件渲染链路：行数、配置面板、当日列、告警档位、单位生效、失败行、账本回退 |
+| `ledgertest.mjs` | 记账规则：下降才记、回升不计、失败不动基准、跨天不记、过旧不记、幂等、累加、脏数据 |
+| `routetest.mjs` | 真 HTTP：路径前缀、方法分派、body 解析、loopback 守卫、账本往返 |
 
-## 实现说明
+账本测试通过 `OFM_CREDIT_WATCH_DIR` 指向临时目录，不会碰用户真实账本。
 
-当日消耗累计数据保存在 `~/.dsh/ofm-widget/daily-YYYY-MM-DD.json`，跨天自动重置。各渠道 API 若未返回积分包过期时间，tooltip 中对应位置显示 `—`。
+## 许可证
+
+MIT

@@ -1,7 +1,8 @@
-# dsh-ofm-credits-widget bundle patch.
+# dsh-ofm-credit-watch bundle patch。
 #
-# 一行 insert 即挂载插件本体（无浏览器半身，纯 Host 生命周期钩子）。
+# 一行 insert 即挂载 Host 半身；浏览器半身由 package.json 的 dsh.client 声明，
+# 并绑定在 name 为裸包名的这一行上（子路径行不会携带半身）。
 - insert:
-    - id: ofm-credits-widget
-      name: 'dsh-ofm-credits-widget'
+    - id: ofm-credit-watch
+      name: 'dsh-ofm-credit-watch'
       config: {}
