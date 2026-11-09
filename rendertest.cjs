@@ -333,6 +333,49 @@ check('收起时不显示配置面板',
     nodes({ [IDX.hidden]: true }).filter(node => node.props?.['data-ofm-credit-watch-handle'] !== undefined).length, 0)
 }
 
+// ── 13. 端到端：拖上边动的必须是上边界 ───────────────────────────────────
+// 回归测试。位置状态曾经只手拼了 relRight、丢掉 anchor.top，于是拉上边表现
+// 成"下边界下移"：高度变大了，上边界却留在原地。这里驱动真的
+// onPointerDown / onPointerMove，直接看状态落到了哪儿。
+{
+  const fakeRoot = {
+    style: {},
+    getBoundingClientRect: () => ({ left: 900, top: 100, right: 1240, bottom: 420, width: 340, height: 320 }),
+  }
+  fakeRoot.closest = () => fakeRoot
+  const originQuery = global.document.querySelector
+  global.document.querySelector = () => fakeRoot
+
+  stateOverrides = {}
+  hooks = []
+  cursor = 0
+  const ctx = { connection: { rpc: { call: async () => ({ ok: true, value: { accounts: [] } }) } } }
+  const tree = React.createElement(t.CreditWatch, { ctx }).type({ ctx })
+  const topHandle = flatten(tree).find(node => node.props?.['data-ofm-credit-watch-handle'] === 'n')
+  const base = {
+    button: 0, clientX: 900, clientY: 100, currentTarget: fakeRoot, pointerId: 1,
+    preventDefault() {}, stopPropagation() {},
+  }
+
+  topHandle.props.onPointerDown(base)
+  topHandle.props.onPointerMove({ clientX: 900, clientY: 60 })   // 往上拖 40
+
+  check('拖上边：上边界跟着走', hooks[IDX.pos].top, 60)
+  check('拖上边：高度随之变大', hooks[IDX.size].height, 360)
+  check('拖上边：右边界留在原地', hooks[IDX.pos].relRight, 40)
+  check('拖上边：宽度不变', hooks[IDX.size].width, 340)
+
+  // 位置与尺寸都已落盘：重开一次应当从 localStorage 读回同一份。
+  const reopened = flatten(render({}))
+    .find(node => node.props?.['data-ofm-credit-watch'] === 'panel')
+  check('重开后：卡片停在上边界 60', reopened.props.style.top, 60)
+  check('重开后：高度仍是 360', reopened.props.style.height, 360)
+
+  global.document.querySelector = originQuery
+  store.delete('ofm-credit-watch.position')
+  store.delete('ofm-credit-watch.size')
+}
+
 // ── 11. poll 的账本回退链路 ───────────────────────────────────────────────
 // 这一节不走 React 渲染，而是直接调 readChannel + 账本函数，验证：
 //   Host 可用 → 用 Host 的累计；Host 不可用 → 退到本地兜底。

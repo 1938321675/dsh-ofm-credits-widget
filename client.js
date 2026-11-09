@@ -725,11 +725,12 @@ window.__ModuleLoader__.load({
       }, [])
 
       /**
-       * 写回尺寸，并按锚点重算「距右边多少」。
+       * 写回尺寸，并按锚点重算位置。
        *
        * 拖动时每帧都走这里：一边落盘，一边直接改 DOM——等下一次 render 才生效
-       * 会迟一帧，手感上就是"粘不住"。`anchor` 是这一帧算出来的左上角，位置
-       * 统一按「右边界距视口右边多少」重算，八个方向共用这一条路径。
+       * 会迟一帧，手感上就是"粘不住"。`anchor` 是这一帧算出来的左上角：
+       * 右边界换算成「距视口右边多少」，上边界直接写回 `top`。两个方向都写，
+       * 八个方向才能在拖自己那条边时真的移动它。
        *
        * 尺寸夹取交给调用方（拖拽走 resizeFromDrag、视口变化走 clampSize）：
        * 在这里再夹一次会覆盖掉"对边固定"的结果，把卡片推走。
@@ -740,7 +741,13 @@ window.__ModuleLoader__.load({
         saveSize(next)
         const left = Math.min(Math.max(0, anchor?.left ?? 0), Math.max(0, vw - next.width))
         setPos(prev => {
-          const merged = { ...prev, relRight: relRightFor(left, next.width, vw) }
+          const merged = {
+            ...prev,
+            relRight: relRightFor(left, next.width, vw),
+            // 上面那条边也要写回：拖上边时高度变大、上边界同时上移，只更新
+            // relRight 会让上边界留在原地，看起来就成了"拉上边动下边"。
+            top: Number.isFinite(anchor?.top) ? Math.max(0, Math.round(anchor.top)) : prev.top,
+          }
           try { window.localStorage?.setItem(POS_KEY, JSON.stringify(merged)) } catch { /* 存储不可用 */ }
           return merged
         })
