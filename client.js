@@ -719,9 +719,13 @@ window.__ModuleLoader__.load({
       const persistPos = useCallback(next => {
         setPos(next)
         try { window.localStorage?.setItem(POS_KEY, JSON.stringify(next)) } catch { /* 存储不可用 */ }
-        // 位置变了立刻移动：等下一次 render 再算会有一次跳动。
+        // 位置变了立刻移动：等下一次 render 再算会有一次跳动。两个方向一起写，
+        // 只写 left 时纵向要慢一帧，斜着拖会看着像卡片在飘。
         const root = document.querySelector('[data-ofm-credit-watch]')
-        if (root) root.style.left = `${leftOf(next, window.innerWidth, root.offsetWidth)}px`
+        if (root) {
+          root.style.left = `${leftOf(next, window.innerWidth, root.offsetWidth)}px`
+          root.style.top = `${Math.round(next.top)}px`
+        }
       }, [])
 
       /**
@@ -740,13 +744,14 @@ window.__ModuleLoader__.load({
         setSize(next)
         saveSize(next)
         const left = Math.min(Math.max(0, anchor?.left ?? 0), Math.max(0, vw - next.width))
+        const top = Number.isFinite(anchor?.top) ? Math.max(0, Math.round(anchor.top)) : null
         setPos(prev => {
           const merged = {
             ...prev,
             relRight: relRightFor(left, next.width, vw),
             // 上面那条边也要写回：拖上边时高度变大、上边界同时上移，只更新
             // relRight 会让上边界留在原地，看起来就成了"拉上边动下边"。
-            top: Number.isFinite(anchor?.top) ? Math.max(0, Math.round(anchor.top)) : prev.top,
+            top: top === null ? prev.top : top,
           }
           try { window.localStorage?.setItem(POS_KEY, JSON.stringify(merged)) } catch { /* 存储不可用 */ }
           return merged
@@ -756,6 +761,10 @@ window.__ModuleLoader__.load({
           root.style.width = `${next.width}px`
           root.style.height = next.height === null ? '' : `${next.height}px`
           root.style.left = `${left}px`
+          // 上边界同样要同步写。高度立刻变了、上边界还在等重渲染时，中间态
+          // 就是"新高度 + 旧上边界"，底边被推出去；pointermove 属于 continuous
+          // 事件，重渲染不保证赶在同一次绘制之前，中间态会被画出来。
+          if (top !== null) root.style.top = `${top}px`
         }
       }, [])
 

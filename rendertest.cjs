@@ -365,11 +365,29 @@ check('收起时不显示配置面板',
   check('拖上边：右边界留在原地', hooks[IDX.pos].relRight, 40)
   check('拖上边：宽度不变', hooks[IDX.size].width, 340)
 
+  // 直接改 DOM 的那一份也要同步写上 top。只写 height 会留下"高度已变、
+  // 上边界未变"的中间态，拖动时看起来就是下边界跟着上边界一起动。
+  check('拖上边：DOM 上边界同步写下去', fakeRoot.style.top, '60px')
+  check('拖上边：DOM 高度同步写下去', fakeRoot.style.height, '360px')
+
   // 位置与尺寸都已落盘：重开一次应当从 localStorage 读回同一份。
   const reopened = flatten(render({}))
     .find(node => node.props?.['data-ofm-credit-watch'] === 'panel')
   check('重开后：卡片停在上边界 60', reopened.props.style.top, 60)
   check('重开后：高度仍是 360', reopened.props.style.height, 360)
+
+  // 同一模式的第二处：拖标题栏时两个方向也要一起写进 DOM，
+  // 只写 left 会让斜着拖时纵向滞后一帧。
+  fakeRoot.style = {}
+  const head = flatten(React.createElement(t.CreditWatch, { ctx }).type({ ctx }))
+    .find(node => node.props?.style?.cursor === 'grab')
+  head.props.onPointerDown({
+    button: 0, clientX: 910, clientY: 110, currentTarget: fakeRoot, pointerId: 2,
+    preventDefault() {}, stopPropagation() {},
+  })
+  head.props.onPointerMove({ clientX: 890, clientY: 160, currentTarget: fakeRoot })
+  check('拖标题栏：DOM 上边界同步写下去', fakeRoot.style.top, '150px')
+  check('拖标题栏：DOM 左边界同步写下去', fakeRoot.style.left, '880px')
 
   global.document.querySelector = originQuery
   store.delete('ofm-credit-watch.position')
