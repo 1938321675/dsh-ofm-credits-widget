@@ -81,6 +81,26 @@ window.__ModuleLoader__.load({
     /** 右下角拖拽角与右侧边缘手柄的命中尺寸。 */
     const HANDLE_CORNER = 14
     const HANDLE_EDGE = 6
+    /** 八个缩放方向：四条边 + 四个角。顺序即渲染顺序，边在前、角在后（角压边）。 */
+    const HANDLES = ['n', 's', 'w', 'e', 'nw', 'ne', 'sw', 'se']
+    /** 每个方向的光标：对角分 nwse / nesw 两种，与 Windows 窗口一致。 */
+    const CURSOR_BY_DIR = {
+      n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize',
+      nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize',
+    }
+    /** 每条热区压在哪几条边上：单边只压自己那一侧，角同时压两个方向。 */
+    const HANDLE_BOX = {
+      n: { top: 0, left: 0, right: 0, height: HANDLE_EDGE },
+      s: { bottom: 0, left: 0, right: 0, height: HANDLE_EDGE },
+      w: { left: 0, top: 0, bottom: 0, width: HANDLE_EDGE },
+      e: { right: 0, top: 0, bottom: 0, width: HANDLE_EDGE },
+      nw: { top: 0, left: 0, width: HANDLE_CORNER, height: HANDLE_CORNER },
+      ne: { top: 0, right: 0, width: HANDLE_CORNER, height: HANDLE_CORNER },
+      sw: { bottom: 0, left: 0, width: HANDLE_CORNER, height: HANDLE_CORNER },
+      se: { bottom: 0, right: 0, width: HANDLE_CORNER, height: HANDLE_CORNER },
+    }
+    /** 热区被鼠标贴上时刷上的提示色；平时是 transparent。 */
+    const HINT_BG = 'color-mix(in srgb, var(--dsw-alias-brand-primary, #4b7bec) 30%, transparent)'
 
     /**
      * 渠道的默认计量单位。
@@ -398,6 +418,38 @@ window.__ModuleLoader__.load({
       try { window.localStorage?.setItem(SIZE_KEY, JSON.stringify(size)) } catch { /* 存储不可用 */ }
     }
 
+    /**
+     * 按下后拖了 (dx, dy)，算出卡片的新几何。
+     *
+     * `rect` 是按下那一刻的四条边界，`dir` 是方向串（'n'/'s'/'w'/'e' 的组合，
+     * 如 'se'、'nw'、'e'）。方向里含哪条边就动哪条，没含的保持不动——这就是
+     * Windows 窗口的对边固定语义。八个方向共用这一套，不写八份特例。
+     *
+     * 返回值里两处值得留意：
+     * - `relRight` 是「右边界距视口右边多少」，位置就存这个量。拖左边时右边界
+     *   不动，它自然不变，所以卡片不会跳；
+     * - `vertical` 表示这次拖动碰没碰高度，调用方据此决定要不要把「高度自适应」
+     *   换成固定值。
+     */
+    function resizeFromDrag(rect, dir, dx, dy, limits) {
+      const vw = typeof window.innerWidth === 'number' ? window.innerWidth : 1280
+      const maxRight = Math.max(rect.left + MIN_WIDTH, Math.round(limits?.maxRight ?? 1e6))
+      const maxBottom = Math.max(rect.top + MIN_HEIGHT, Math.round(limits?.maxBottom ?? 1e6))
+      let { left, top, right, bottom } = rect
+      if (dir.includes('e')) right = Math.min(Math.max(rect.right + dx, rect.left + MIN_WIDTH), maxRight)
+      if (dir.includes('w')) left = Math.min(Math.max(rect.left + dx, 0), rect.right - MIN_WIDTH)
+      if (dir.includes('s')) bottom = Math.min(Math.max(rect.bottom + dy, rect.top + MIN_HEIGHT), maxBottom)
+      if (dir.includes('n')) top = Math.min(Math.max(rect.top + dy, 0), rect.bottom - MIN_HEIGHT)
+      return {
+        left: Math.round(left),
+        top: Math.round(top),
+        width: Math.round(right - left),
+        height: Math.round(bottom - top),
+        relRight: Math.max(0, Math.round(vw - right)),
+        vertical: dir.includes('n') || dir.includes('s'),
+      }
+    }
+
     // ─── 当日累计账本 ────────────────────────────────────────────────────────
     /** 北京时间下的 YYYY-MM-DD：「今天」必须与用户日历一致，与进程时区无关。 */
     function localDate() {
@@ -676,24 +728,26 @@ window.__ModuleLoader__.load({
        * 写回尺寸，并按锚点重算「距右边多少」。
        *
        * 拖动时每帧都走这里：一边落盘，一边直接改 DOM——等下一次 render 才生效
-       * 会迟一帧，手感上就是"粘不住"。`anchor.left` 是拖动开始时的左边界，
-       * 宽度变化后靠它把左边界钉住（位置存的是相对右边的距离）。
+       * 会迟一帧，手感上就是"粘不住"。`anchor` 是这一帧算出来的左上角，位置
+       * 统一按「右边界距视口右边多少」重算，八个方向共用这一条路径。
+       *
+       * 尺寸夹取交给调用方（拖拽走 resizeFromDrag、视口变化走 clampSize）：
+       * 在这里再夹一次会覆盖掉"对边固定"的结果，把卡片推走。
        */
       const persistSize = useCallback((next, anchor) => {
         const vw = typeof window.innerWidth === 'number' ? window.innerWidth : 1280
-        const settled = clampSize(next, sizeLimits(anchor?.top))
-        setSize(settled)
-        saveSize(settled)
-        const left = Math.min(Math.max(0, anchor?.left ?? 0), Math.max(0, vw - settled.width))
+        setSize(next)
+        saveSize(next)
+        const left = Math.min(Math.max(0, anchor?.left ?? 0), Math.max(0, vw - next.width))
         setPos(prev => {
-          const merged = { ...prev, relRight: relRightFor(left, settled.width, vw) }
+          const merged = { ...prev, relRight: relRightFor(left, next.width, vw) }
           try { window.localStorage?.setItem(POS_KEY, JSON.stringify(merged)) } catch { /* 存储不可用 */ }
           return merged
         })
         const root = document.querySelector('[data-ofm-credit-watch]')
         if (root) {
-          root.style.width = `${settled.width}px`
-          root.style.height = settled.height === null ? '' : `${settled.height}px`
+          root.style.width = `${next.width}px`
+          root.style.height = next.height === null ? '' : `${next.height}px`
           root.style.left = `${left}px`
         }
       }, [])
@@ -837,8 +891,14 @@ window.__ModuleLoader__.load({
         const onResize = () => {
           const root = document.querySelector('[data-ofm-credit-watch]')
           if (!root) return
-          const rect = root.getBoundingClientRect()
-          persistSize(size, { left: rect.left, top: pos.top })
+          const vw = typeof window.innerWidth === 'number' ? window.innerWidth : 1280
+          const vh = typeof window.innerHeight === 'number' ? window.innerHeight : 800
+          // 视口变小：先把尺寸夹回可用范围，再按原来的右边距贴回去。
+          const settled = clampSize(size, sizeLimits(pos.top))
+          const top = settled.height === null
+            ? pos.top
+            : Math.max(0, Math.min(pos.top, vh - settled.height - SIZE_MARGIN))
+          persistSize(settled, { left: leftOf(pos, vw, settled.width), top })
         }
         window.addEventListener('resize', onResize)
         return () => window.removeEventListener('resize', onResize)
@@ -875,28 +935,25 @@ window.__ModuleLoader__.load({
         try { event.currentTarget?.releasePointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
       }, [])
 
-      // ── 缩放 ────────────────────────────────────────────────────────────
-      // 与拖动共用 pointer 事件与指针捕获，差别只在带不带纵向分量：
-      // 右下角是 'xy'，右侧边缘是 'x'。拖动期间只碰尺寸与位置，别的不动。
+      // ── 缩放：八个方向共用一套 ──────────────────────────────────────────
+      // 与拖动共用 pointer 事件与指针捕获，差别只有方向串。按下时把四条边界
+      // 记成基准：拖动中每帧都会重渲染，用实时值当基准会把位移叠加进去。
       const resize = useRef(null)
-      const resizeHandlers = mode => ({
+      const resizeHandlers = dir => ({
         onPointerDown: event => {
           if (event.button !== undefined && event.button !== 0) return
+          // 折叠时的高度就是标题栏，纵向没有可拉的余地：这类方向不响应。
+          const mode = collapsed ? dir.replace(/[ns]/g, '') : dir
+          if (mode === '') return
           const target = event.currentTarget
           const root = target?.closest?.('[data-ofm-credit-watch]')
           if (root === null || root === undefined) return
           const rect = root.getBoundingClientRect()
-          // 基准值全部取自按下那一刻：拖动中每帧都会重渲染，
-          // 用实时值当基准会把前面的位移叠加进去，越拉越快。
           resize.current = {
             mode,
-            collapsed,
             startX: event.clientX,
             startY: event.clientY,
-            startWidth: rect.width,
-            startHeight: rect.height,
-            left: rect.left,
-            top: rect.top,
+            rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
             fixedHeight: size.height,
           }
           try { target.setPointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
@@ -906,20 +963,24 @@ window.__ModuleLoader__.load({
         onPointerMove: event => {
           const state = resize.current
           if (state === null) return
-          // 纵向只在右下角、且没折叠时参与：折叠态的"高度"就是标题栏，
-          // 拉伸它没有意义；右侧边缘手柄的职责本来就是只改宽度。
-          const useHeight = state.mode === 'xy' && !state.collapsed
+          const vw = typeof window.innerWidth === 'number' ? window.innerWidth : 1280
+          const vh = typeof window.innerHeight === 'number' ? window.innerHeight : 800
+          const moved = resizeFromDrag(
+            state.rect, state.mode,
+            event.clientX - state.startX, event.clientY - state.startY,
+            { maxRight: vw - SIZE_MARGIN, maxBottom: vh - SIZE_MARGIN })
           persistSize({
-            width: state.startWidth + (event.clientX - state.startX),
-            height: useHeight ? state.startHeight + (event.clientY - state.startY) : state.fixedHeight,
-          }, state)
+            width: moved.width,
+            // 没碰纵向就保持原来的高度语义：该自适应还自适应。
+            height: moved.vertical ? moved.height : state.fixedHeight,
+          }, { left: moved.left, top: moved.top })
         },
         onPointerUp: event => {
           if (resize.current === null) return
           resize.current = null
           try { event.currentTarget?.releasePointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
         },
-        // 双击复位：拉坏了不用去找配置文件，回到默认宽度 + 高度自适应。
+        // 双击复位：拉坏了不用去翻配置文件，回到默认宽度 + 高度自适应。
         onDoubleClick: event => {
           event.preventDefault()
           event.stopPropagation()
@@ -929,8 +990,6 @@ window.__ModuleLoader__.load({
             { left: rect?.left ?? 0, top: rect?.top ?? pos.top })
         },
       })
-      const cornerHandlers = resizeHandlers('xy')
-      const edgeHandlers = resizeHandlers('x')
 
       // ── 排序与汇总 ───────────────────────────────────────────────────────
       // 只有被勾选显示的渠道才参与列表渲染与排序；数据仍然全部采集，
@@ -1089,22 +1148,16 @@ window.__ModuleLoader__.load({
         configActions: {
           display: 'flex', gap: 6, padding: '6px 10px 0',
         },
-        // 两个缩放手柄：平时半透明待着不抢视线，鼠标扫过才加深。
-        // 斜纹是"这里能拉"的通用记号。
-        handleCorner: {
-          position: 'absolute', right: 0, bottom: 0,
-          width: HANDLE_CORNER, height: HANDLE_CORNER,
-          cursor: 'nwse-resize', touchAction: 'none', opacity: 0.45,
-          background: 'repeating-linear-gradient(135deg, transparent 0 3px, var(--dsw-alias-label-secondary, #888) 3px 4.5px)',
-          borderBottomRightRadius: 13,
-        },
-        handleEdge: {
-          position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
-          width: HANDLE_EDGE, height: 28,
-          cursor: 'ew-resize', touchAction: 'none', opacity: 0.45,
-          borderRadius: '3px 0 0 3px',
-          background: 'var(--dsw-alias-label-secondary, #888)',
-        },
+        // 八个缩放热区：平时完全透明（卡片看起来没有任何装饰），鼠标贴到边上
+        // 才由处理器刷上提示色。角排在边之后、层级更高，重叠处归角。
+        handle: dir => ({
+          position: 'absolute',
+          zIndex: dir.length === 2 ? 2 : 1,
+          cursor: CURSOR_BY_DIR[dir],
+          touchAction: 'none',
+          background: 'transparent',
+          ...HANDLE_BOX[dir],
+        }),
       }
 
       // ── 隐藏态：只留一个小胶囊，避免占着屏幕又找不回来 ───────────────────
@@ -1276,23 +1329,17 @@ window.__ModuleLoader__.load({
             // 有隐藏项时明说一句，免得"渠道怎么变少了"看起来像故障。
             hiddenCount > 0 ? h('span', null, fill(t('hiddenCount'), { count: hiddenCount })) : null,
             failedCount > 0 ? h('span', { style: { color: 'var(--dsw-alias-state-error-primary, #d33)' } }, `⚠ ${failedCount}`) : null)),
-        // 缩放手柄。绝对定位，不占列表的流；折叠态由处理器自己忽略纵向分量。
-        h('div', {
-          'data-ofm-credit-watch-handle': 'corner',
-          style: style.handleCorner,
-          title: t('resizeCorner'),
-          onPointerEnter: event => { event.currentTarget.style.opacity = '0.85' },
-          onPointerLeave: event => { event.currentTarget.style.opacity = '0.45' },
-          ...cornerHandlers,
-        }),
-        h('div', {
-          'data-ofm-credit-watch-handle': 'edge',
-          style: style.handleEdge,
-          title: t('resizeEdge'),
-          onPointerEnter: event => { event.currentTarget.style.opacity = '0.85' },
-          onPointerLeave: event => { event.currentTarget.style.opacity = '0.45' },
-          ...edgeHandlers,
-        }))
+        // 八向缩放热区。绝对定位，不占列表的流；平时透明，鼠标贴到边上才透出
+        // 提示色——像 Windows 窗口的边框。角和边的提示语不同：角能同时改宽高。
+        ...HANDLES.map(dir => h('div', {
+          key: dir,
+          'data-ofm-credit-watch-handle': dir,
+          style: style.handle(dir),
+          title: dir.length === 2 ? t('resizeCorner') : t('resizeEdge'),
+          onPointerEnter: event => { event.currentTarget.style.background = HINT_BG },
+          onPointerLeave: event => { event.currentTarget.style.background = 'transparent' },
+          ...resizeHandlers(dir),
+        })))
     }
 
     // ─── 插件体 ──────────────────────────────────────────────────────────────
@@ -1321,8 +1368,8 @@ window.__ModuleLoader__.load({
       normalizeHidden, toggleHidden, CHANNELS, DICT, HIDDEN_KEY,
       formatAmount, unitOf, toneOf, expireOf, tooltipOf, normalizeTotals,
       accumulateLocal, loadLocalDaily, loadPos, leftOf, localDate, round2,
-      loadSize, saveSize, clampSize, relRightFor, sizeLimits,
-      SIZE_KEY, MIN_WIDTH, MIN_HEIGHT,
+      loadSize, saveSize, clampSize, relRightFor, sizeLimits, resizeFromDrag,
+      SIZE_KEY, MIN_WIDTH, MIN_HEIGHT, HANDLES, CURSOR_BY_DIR,
     }
     return module.exports
   },

@@ -285,8 +285,8 @@ check('收起时不显示配置面板',
 
 // ── 11. poll 的账本回退链路 ───────────────────────────────────────────────
 // ── 12. 缩放手柄与尺寸 ────────────────────────────────────────────────────
-// 尺寸状态落到卡片 style，两个手柄各自带上自己的光标；折叠时高度回落自适应，
-// 否则收起后下面会留一片空白。
+// 尺寸状态落到卡片 style；八个方向各一只热区、各自带自己的光标；
+// 折叠时高度回落自适应，隐藏态干脆不渲染手柄。
 {
   const nodes = overrides => flatten(render(overrides))
   const panelOf = overrides => nodes(overrides)
@@ -306,18 +306,27 @@ check('收起时不显示配置面板',
   check('折叠时高度回落自适应',
     panelOf({ [IDX.size]: { width: 480, height: 320 }, [IDX.collapsed]: true }).props.style.height, 'auto')
 
-  check('两个手柄都在且光标各自正确', handlesOf({}),
-    [['corner', 'nwse-resize'], ['edge', 'ew-resize']])
+  // 八个方向的热区与光标：上下、左右、两个对角各成一组。
+  check('八个方向的热区与光标齐全', handlesOf({}), [
+    ['n', 'ns-resize'], ['s', 'ns-resize'],
+    ['w', 'ew-resize'], ['e', 'ew-resize'],
+    ['nw', 'nwse-resize'], ['ne', 'nesw-resize'],
+    ['sw', 'nesw-resize'], ['se', 'nwse-resize'],
+  ])
 
-  const corner = nodes({}).find(node => node.props?.['data-ofm-credit-watch-handle'] === 'corner')
-  check('拖拽角贴在右下角',
-    [corner.props.style.position, corner.props.style.right, corner.props.style.bottom], ['absolute', 0, 0])
-  check('拖拽角可双击复位', typeof corner.props.onDoubleClick, 'function')
+  const handle = dir => nodes({}).find(node => node.props?.['data-ofm-credit-watch-handle'] === dir)
+  const box = dir => {
+    const style = handle(dir).props.style
+    return [style.position, style.top, style.right, style.bottom, style.left, style.width, style.height]
+  }
+  // 热区贴着卡片边缘：单边只压自己那一侧，角同时压两个方向。
+  check('上边热区压顶', box('n'), ['absolute', 0, 0, undefined, 0, undefined, 6])
+  check('左边热区压左', box('w'), ['absolute', 0, undefined, 0, 0, 6, undefined])
+  check('右下角同时贴右下', box('se'), ['absolute', undefined, 0, 0, undefined, 14, 14])
 
-  const edge = nodes({}).find(node => node.props?.['data-ofm-credit-watch-handle'] === 'edge')
-  check('右边缘手柄贴右边且垂直居中',
-    [edge.props.style.position, edge.props.style.right, edge.props.style.top], ['absolute', 0, '50%'])
-  check('右边缘手柄也能双击复位', typeof edge.props.onDoubleClick, 'function')
+  check('热区平时透明（鼠标贴上才显形）', handle('se').props.style.background, 'transparent')
+  check('热区都压在卡片之上', [handle('se').props.style.zIndex, handle('n').props.style.zIndex], [2, 1])
+  check('热区可双击复位', typeof handle('se').props.onDoubleClick, 'function')
 
   // 隐藏态只留一个小胶囊，没有可拉的边。
   check('隐藏态不渲染手柄',

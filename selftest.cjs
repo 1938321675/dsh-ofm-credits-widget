@@ -491,6 +491,56 @@ check('normalizeTotals 保留两位', t.normalizeTotals({ a: 1.23456 }), { a: 1.
   global.window.localStorage._data.delete(t.SIZE_KEY)
 }
 
+// ── 11. 八向缩放：对边固定与夹取 ─────────────────────────────────────────
+// 基准是按下那一刻的四条边界，方向里没含的那条边保持不动——这就是 Windows
+// 窗口的对边固定语义。八个方向共用这一个函数，所以在这里逐向钉死。
+{
+  // 340 × 320 的卡片，视口 1280 × 800、四边各留 16。
+  const rect = { left: 900, top: 100, right: 1240, bottom: 420 }
+  const limits = { maxRight: 1264, maxBottom: 784 }
+  const drag = (dir, dx, dy) => t.resizeFromDrag(rect, dir, dx, dy, limits)
+
+  // 四条边：动的只有自己那条，对边留在原地。
+  check('拖右边：左边界不动', drag('e', 100, 0),
+    { left: 900, top: 100, width: 364, height: 320, relRight: 16, vertical: false })
+  check('拖左边：右边界不动', drag('w', -100, 0),
+    { left: 800, top: 100, width: 440, height: 320, relRight: 40, vertical: false })
+  check('拖上边：下边界不动', drag('n', 0, -100),
+    { left: 900, top: 0, width: 340, height: 420, relRight: 40, vertical: true })
+  check('拖下边：上边界不动', drag('s', 0, 50),
+    { left: 900, top: 100, width: 340, height: 370, relRight: 40, vertical: true })
+
+  // 四个角：两条边同时动，对角的两条边不动。
+  check('拖左上角：右下边界不动', drag('nw', -100, -100),
+    { left: 800, top: 0, width: 440, height: 420, relRight: 40, vertical: true })
+  check('拖右上角：左下边界不动', drag('ne', 100, -50),
+    { left: 900, top: 50, width: 364, height: 370, relRight: 16, vertical: true })
+  check('拖左下角：右上边界不动', drag('sw', -100, 50),
+    { left: 800, top: 100, width: 440, height: 370, relRight: 40, vertical: true })
+  check('拖右下角：左上边界不动', drag('se', 100, 100),
+    { left: 900, top: 100, width: 364, height: 420, relRight: 16, vertical: true })
+
+  // 夹取：拉到极限就停住，不会把卡片拉翻或者拉没。
+  check('宽度顶住下限（右边往左推）', drag('e', -500, 0),
+    { left: 900, top: 100, width: t.MIN_WIDTH, height: 320, relRight: 140, vertical: false })
+  check('宽度顶住下限（左边往右推）', drag('w', 500, 0),
+    { left: 1000, top: 100, width: t.MIN_WIDTH, height: 320, relRight: 40, vertical: false })
+  check('高度顶住下限（下边往上推）', drag('s', 0, -500),
+    { left: 900, top: 100, width: 340, height: t.MIN_HEIGHT, relRight: 40, vertical: true })
+  check('高度顶住下限（上边往下推）', drag('n', 0, 500),
+    { left: 900, top: 300, width: 340, height: t.MIN_HEIGHT, relRight: 40, vertical: true })
+  check('上边界不越过视口顶部', drag('n', 0, -9999),
+    { left: 900, top: 0, width: 340, height: 420, relRight: 40, vertical: true })
+  check('下边界停在视口留缝处', drag('s', 0, 9999),
+    { left: 900, top: 100, width: 340, height: 684, relRight: 40, vertical: true })
+
+  // vertical 决定调用方要不要把高度固定下来：没含纵向就保持原来的高度语义。
+  check('只拖横向时不碰高度', drag('w', -10, -10).vertical, false)
+  check('拖到纵向时才固定高度', drag('se', 10, 10).vertical, true)
+  check('原地不动时几何不变', drag('e', 0, 0),
+    { left: 900, top: 100, width: 340, height: 320, relRight: 40, vertical: false })
+}
+
 // ── 收口 ──────────────────────────────────────────────────────────────────
 testReadChannel()
   .then(testReadChannelDetail)
