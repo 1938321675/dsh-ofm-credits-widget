@@ -447,6 +447,50 @@ check('normalizeTotals 保留两位', t.normalizeTotals({ a: 1.23456 }), { a: 1.
   global.window.localStorage._data.delete('ofm-credit-watch.daily')
 }
 
+// ── 10. 尺寸：夹取与「左边界钉住」的换算 ──────────────────────────────────
+// 卡片可拉伸之后宽度不再是常量，而位置仍按「距右边多少」存：宽度一变，
+// 旧的 relRight 就会把左边界推走。relRightFor 负责把左边界钉住。
+{
+  const limits = { maxWidth: 1280 - 16, maxHeight: 800 - 88 - 16 }
+
+  check('clampSize 原样返回合法尺寸',
+    t.clampSize({ width: 340, height: null }, limits), { width: 340, height: null })
+  check('clampSize 顶住宽度下限',
+    t.clampSize({ width: 100, height: null }, limits), { width: t.MIN_WIDTH, height: null })
+  check('clampSize 顶住高度下限',
+    t.clampSize({ width: 340, height: 10 }, limits), { width: 340, height: t.MIN_HEIGHT })
+  check('clampSize 顶住宽度上限',
+    t.clampSize({ width: 99999, height: null }, limits), { width: limits.maxWidth, height: null })
+  check('clampSize 顶住高度上限',
+    t.clampSize({ width: 340, height: 99999 }, limits), { width: 340, height: limits.maxHeight })
+  check('clampSize 脏宽度回落默认值',
+    t.clampSize({ width: NaN, height: null }, limits), { width: 340, height: null })
+  check('clampSize 取整',
+    t.clampSize({ width: 412.6, height: null }, limits), { width: 413, height: null })
+
+  // 左边界钉住：宽度 340 → 480，left 仍是 100。
+  const relRight = t.relRightFor(100, 480, 1280)
+  check('relRightFor 换算', relRight, 700)
+  check('宽度变化后左边界不动', t.leftOf({ relRight, top: 0 }, 1280, 480), 100)
+  check('relRightFor 不会算成负数', t.relRightFor(1270, 480, 1280), 0)
+
+  t.saveSize({ width: 420, height: null })
+  check('saveSize 之后 loadSize 读回同一份', t.loadSize(), { width: 420, height: null })
+
+  global.window.localStorage.setItem(t.SIZE_KEY, JSON.stringify({ width: 460, height: 280 }))
+  check('loadSize 读回已存的宽高', t.loadSize(), { width: 460, height: 280 })
+
+  global.window.localStorage.setItem(t.SIZE_KEY, '不是 JSON')
+  check('坏尺寸回落到默认值', t.loadSize(), { width: 340, height: null })
+
+  // 换到小窗口：存进去的超大尺寸必须夹回视口内，否则手柄会跑到屏幕外抓不回来。
+  global.window.innerWidth = 900
+  global.window.localStorage.setItem(t.SIZE_KEY, JSON.stringify({ width: 5000, height: 5000 }))
+  check('loadSize 把超出视口的尺寸夹回来', t.loadSize(), { width: 900 - 16, height: 800 - 16 })
+  global.window.innerWidth = 1280
+  global.window.localStorage._data.delete(t.SIZE_KEY)
+}
+
 // ── 收口 ──────────────────────────────────────────────────────────────────
 testReadChannel()
   .then(testReadChannelDetail)

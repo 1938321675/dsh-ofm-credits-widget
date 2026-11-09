@@ -69,8 +69,18 @@ window.__ModuleLoader__.load({
     const LEDGER_URL = '/api/ofm-credit-watch/ledger'
     /** 「都在安静」的判定窗口：超过它就当作不活跃。 */
     const IDLE_WINDOW_MS = 5 * 60_000
-    /** 卡片宽度：位置换算与拖动夹取都要用，共用一个常量。 */
+    /** 卡片默认宽度：位置换算、拖动夹取、手柄复位共用一个常量。 */
     const PANEL_WIDTH = 340
+    /** 尺寸持久化键。高度为 null 表示「随内容自适应」。 */
+    const SIZE_KEY = 'ofm-credit-watch.size'
+    /** 尺寸下限：比这更窄，名称列的省略号就没意义了；比这更矮只剩标题栏。 */
+    const MIN_WIDTH = 240
+    const MIN_HEIGHT = 120
+    /** 卡片与视口边缘留的缝：拉到最大也要给手柄留出抓回来的余地。 */
+    const SIZE_MARGIN = 16
+    /** 右下角拖拽角与右侧边缘手柄的命中尺寸。 */
+    const HANDLE_CORNER = 14
+    const HANDLE_EDGE = 6
 
     /**
      * 渠道的默认计量单位。
@@ -105,6 +115,8 @@ window.__ModuleLoader__.load({
         close: '隐藏',
         show: '积分',
         dragHint: '拖动标题栏可移动',
+        resizeCorner: '拖动可改宽高，双击复位',
+        resizeEdge: '拖动只改宽度，双击复位',
         total: '合计',
         accounts: '{count} 个账号',
         summary: '{channels} 个渠道有余额 · {total}',
@@ -145,6 +157,8 @@ window.__ModuleLoader__.load({
         close: 'Hide',
         show: 'Credits',
         dragHint: 'Drag the title bar to move',
+        resizeCorner: 'Drag to resize, double-click to reset',
+        resizeEdge: 'Drag to change the width only, double-click to reset',
         total: 'Total',
         accounts: '{count} accounts',
         summary: '{channels} channels with balance · {total}',
@@ -328,6 +342,60 @@ window.__ModuleLoader__.load({
       const width = Number.isFinite(viewportWidth) ? viewportWidth : 1280
       const panel = Number.isFinite(panelWidth) && panelWidth > 0 ? panelWidth : PANEL_WIDTH
       return Math.max(0, Math.min(width - panel - pos.relRight, width - panel))
+    }
+
+    // ─── 尺寸：卡片可拉伸，宽度不再是常量 ────────────────────────────────────
+    /**
+     * 把尺寸夹进可用范围。
+     *
+     * `limits` 由调用方按当时的视口与卡片顶部算出：高度上限必须减掉 top，
+     * 否则卡片被拉到屏幕底部之外时，右下角手柄自己先出了屏幕，就再也抓不回来。
+     * `height` 为 null 表示「高度随内容自适应」，原样穿透。
+     */
+    function clampSize(size, limits) {
+      const maxWidth = Math.max(MIN_WIDTH, Math.round(limits?.maxWidth ?? 1280))
+      const maxHeight = Math.max(MIN_HEIGHT, Math.round(limits?.maxHeight ?? 800))
+      const rawWidth = Number(size?.width)
+      const width = Math.round(Math.min(
+        Math.max(Number.isFinite(rawWidth) ? rawWidth : PANEL_WIDTH, MIN_WIDTH), maxWidth))
+      if (size?.height === null || size?.height === undefined) return { width, height: null }
+      const rawHeight = Number(size.height)
+      const height = Math.round(Math.min(
+        Math.max(Number.isFinite(rawHeight) ? rawHeight : MIN_HEIGHT, MIN_HEIGHT), maxHeight))
+      return { width, height }
+    }
+
+    /**
+     * 宽度变化后重算「距右边多少」，把左边界钉在原地。
+     *
+     * 位置存的是相对右边的距离，宽度一变、原来的 relRight 就会把卡片整体推走。
+     * 拖动时以左边界为锚重算一次，卡片才是「向右长」而不是「平移」。
+     */
+    function relRightFor(left, width, viewportWidth) {
+      const vw = Number.isFinite(viewportWidth) ? viewportWidth : 1280
+      return Math.max(0, Math.round(vw - left - width))
+    }
+
+    /** 按视口与卡片顶部算出尺寸上限。 */
+    function sizeLimits(top) {
+      const vw = typeof window.innerWidth === 'number' ? window.innerWidth : 1280
+      const vh = typeof window.innerHeight === 'number' ? window.innerHeight : 800
+      const anchor = Number.isFinite(top) ? Math.max(0, top) : 0
+      return { maxWidth: vw - SIZE_MARGIN, maxHeight: vh - anchor - SIZE_MARGIN }
+    }
+
+    /** 读尺寸。没存过就是默认宽度 + 高度自适应——升级后外观与旧版一致。 */
+    function loadSize() {
+      try {
+        const raw = JSON.parse(window.localStorage?.getItem(SIZE_KEY) ?? 'null')
+        if (raw !== null && typeof raw === 'object') return clampSize(raw, sizeLimits())
+      } catch { /* 存储不可用 */ }
+      return { width: PANEL_WIDTH, height: null }
+    }
+
+    /** 写尺寸。 */
+    function saveSize(size) {
+      try { window.localStorage?.setItem(SIZE_KEY, JSON.stringify(size)) } catch { /* 存储不可用 */ }
     }
 
     // ─── 当日累计账本 ────────────────────────────────────────────────────────
@@ -585,6 +653,9 @@ window.__ModuleLoader__.load({
       const [configOpen, setConfigOpen] = useState(false)
       // 当日累计消耗（provider → 数量）。
       const [today, setToday] = useState(() => loadLocalDaily().totals)
+      // 卡片尺寸。height 为 null 表示高度随内容自适应：只有拖过右下角才会
+      // 固定下来，因此老用户升级后看到的卡片与原来一样高。
+      const [size, setSize] = useState(loadSize)
 
       // 上一轮读数与串行保护：轮询和手动刷新可能重叠，只允许最新一轮落库。
       const previous = useRef(null)
@@ -599,6 +670,32 @@ window.__ModuleLoader__.load({
         // 位置变了立刻移动：等下一次 render 再算会有一次跳动。
         const root = document.querySelector('[data-ofm-credit-watch]')
         if (root) root.style.left = `${leftOf(next, window.innerWidth, root.offsetWidth)}px`
+      }, [])
+
+      /**
+       * 写回尺寸，并按锚点重算「距右边多少」。
+       *
+       * 拖动时每帧都走这里：一边落盘，一边直接改 DOM——等下一次 render 才生效
+       * 会迟一帧，手感上就是"粘不住"。`anchor.left` 是拖动开始时的左边界，
+       * 宽度变化后靠它把左边界钉住（位置存的是相对右边的距离）。
+       */
+      const persistSize = useCallback((next, anchor) => {
+        const vw = typeof window.innerWidth === 'number' ? window.innerWidth : 1280
+        const settled = clampSize(next, sizeLimits(anchor?.top))
+        setSize(settled)
+        saveSize(settled)
+        const left = Math.min(Math.max(0, anchor?.left ?? 0), Math.max(0, vw - settled.width))
+        setPos(prev => {
+          const merged = { ...prev, relRight: relRightFor(left, settled.width, vw) }
+          try { window.localStorage?.setItem(POS_KEY, JSON.stringify(merged)) } catch { /* 存储不可用 */ }
+          return merged
+        })
+        const root = document.querySelector('[data-ofm-credit-watch]')
+        if (root) {
+          root.style.width = `${settled.width}px`
+          root.style.height = settled.height === null ? '' : `${settled.height}px`
+          root.style.left = `${left}px`
+        }
       }, [])
 
       /**
@@ -734,16 +831,18 @@ window.__ModuleLoader__.load({
         return () => window.clearInterval(timer)
       }, [])
 
-      // 视口变化后贴回右边：位置存的是相对右边的距离，缩放时要重新解算。
+      // 视口变化后先夹尺寸、再贴回右边：位置存的是相对右边的距离，
+      // 窗口一缩窄，卡片宽度本身也可能超出视口，两样都要重新解算。
       useEffect(() => {
         const onResize = () => {
           const root = document.querySelector('[data-ofm-credit-watch]')
           if (!root) return
-          root.style.left = `${leftOf(pos, window.innerWidth, root.offsetWidth)}px`
+          const rect = root.getBoundingClientRect()
+          persistSize(size, { left: rect.left, top: pos.top })
         }
         window.addEventListener('resize', onResize)
         return () => window.removeEventListener('resize', onResize)
-      }, [pos])
+      }, [pos, size, persistSize])
 
       // ── 拖动 ────────────────────────────────────────────────────────────
       // 用 pointer 事件而不是 mouse：触摸屏与手写笔同样可用，且 setPointerCapture
@@ -775,6 +874,63 @@ window.__ModuleLoader__.load({
         drag.current = null
         try { event.currentTarget?.releasePointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
       }, [])
+
+      // ── 缩放 ────────────────────────────────────────────────────────────
+      // 与拖动共用 pointer 事件与指针捕获，差别只在带不带纵向分量：
+      // 右下角是 'xy'，右侧边缘是 'x'。拖动期间只碰尺寸与位置，别的不动。
+      const resize = useRef(null)
+      const resizeHandlers = mode => ({
+        onPointerDown: event => {
+          if (event.button !== undefined && event.button !== 0) return
+          const target = event.currentTarget
+          const root = target?.closest?.('[data-ofm-credit-watch]')
+          if (root === null || root === undefined) return
+          const rect = root.getBoundingClientRect()
+          // 基准值全部取自按下那一刻：拖动中每帧都会重渲染，
+          // 用实时值当基准会把前面的位移叠加进去，越拉越快。
+          resize.current = {
+            mode,
+            collapsed,
+            startX: event.clientX,
+            startY: event.clientY,
+            startWidth: rect.width,
+            startHeight: rect.height,
+            left: rect.left,
+            top: rect.top,
+            fixedHeight: size.height,
+          }
+          try { target.setPointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
+          event.preventDefault()
+          event.stopPropagation()
+        },
+        onPointerMove: event => {
+          const state = resize.current
+          if (state === null) return
+          // 纵向只在右下角、且没折叠时参与：折叠态的"高度"就是标题栏，
+          // 拉伸它没有意义；右侧边缘手柄的职责本来就是只改宽度。
+          const useHeight = state.mode === 'xy' && !state.collapsed
+          persistSize({
+            width: state.startWidth + (event.clientX - state.startX),
+            height: useHeight ? state.startHeight + (event.clientY - state.startY) : state.fixedHeight,
+          }, state)
+        },
+        onPointerUp: event => {
+          if (resize.current === null) return
+          resize.current = null
+          try { event.currentTarget?.releasePointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
+        },
+        // 双击复位：拉坏了不用去找配置文件，回到默认宽度 + 高度自适应。
+        onDoubleClick: event => {
+          event.preventDefault()
+          event.stopPropagation()
+          const root = event.currentTarget?.closest?.('[data-ofm-credit-watch]')
+          const rect = root?.getBoundingClientRect?.()
+          persistSize({ width: PANEL_WIDTH, height: null },
+            { left: rect?.left ?? 0, top: rect?.top ?? pos.top })
+        },
+      })
+      const cornerHandlers = resizeHandlers('xy')
+      const edgeHandlers = resizeHandlers('x')
 
       // ── 排序与汇总 ───────────────────────────────────────────────────────
       // 只有被勾选显示的渠道才参与列表渲染与排序；数据仍然全部采集，
@@ -837,9 +993,14 @@ window.__ModuleLoader__.load({
       const style = {
         panel: {
           position: 'fixed',
-          left: leftOf(pos, typeof window.innerWidth === 'number' ? window.innerWidth : 1280, PANEL_WIDTH),
+          left: leftOf(pos, typeof window.innerWidth === 'number' ? window.innerWidth : 1280, size.width),
           top: pos.top,
-          width: PANEL_WIDTH,
+          width: size.width,
+          // 折叠态与"没拉过"都走自适应；显式高度只在用户拉过之后才生效。
+          height: collapsed || size.height === null ? 'auto' : size.height,
+          // 纵向 flex：高度固定时让列表区吃掉剩余空间、自己滚动。
+          display: 'flex',
+          flexDirection: 'column',
           zIndex: 2147483000,
           pointerEvents: 'auto',
           borderRadius: 14,
@@ -859,6 +1020,7 @@ window.__ModuleLoader__.load({
           gap: 8,
           padding: '9px 10px 8px',
           cursor: 'grab',
+          flexShrink: 0,
           borderBottom: collapsed ? 'none' : '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))',
           touchAction: 'none',
         },
@@ -868,7 +1030,11 @@ window.__ModuleLoader__.load({
           border: 'none', background: 'transparent', cursor: 'pointer', padding: '2px 4px',
           color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 13, lineHeight: 1, borderRadius: 6,
         },
-        body: { maxHeight: 320, overflowY: 'auto', padding: '4px 0 6px' },
+        // 高度自适应时列表最多 320 高；用户拉过右下角之后改成吃满剩余空间。
+        // 两条路都靠自身滚动，卡片不会被内容撑开。
+        body: size.height === null || collapsed
+          ? { maxHeight: 320, overflowY: 'auto', padding: '4px 0 6px' }
+          : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0 6px' },
         // 四列：色条 / 名称 / 本分钟消耗 / 余额（余额下方叠当日累计）。
         // 消耗与余额分成两列，数字不再挤在同一格里——量级差很大时
         // （1352 余额 vs −1.0 消耗）挤在一列会读成一串。
@@ -893,7 +1059,7 @@ window.__ModuleLoader__.load({
         footer: {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
           padding: '6px 10px 8px', borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))',
-          color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 10.5,
+          color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 10.5, flexShrink: 0,
         },
         pill: {
           border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.22))',
@@ -903,7 +1069,7 @@ window.__ModuleLoader__.load({
         empty: { padding: '10px 12px 12px', color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 11 },
         configPane: {
           borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))',
-          padding: '6px 0 8px',
+          padding: '6px 0 8px', flexShrink: 0,
         },
         configHint: {
           padding: '2px 10px 6px', color: 'var(--dsw-alias-label-secondary, #888)',
@@ -923,6 +1089,22 @@ window.__ModuleLoader__.load({
         configActions: {
           display: 'flex', gap: 6, padding: '6px 10px 0',
         },
+        // 两个缩放手柄：平时半透明待着不抢视线，鼠标扫过才加深。
+        // 斜纹是"这里能拉"的通用记号。
+        handleCorner: {
+          position: 'absolute', right: 0, bottom: 0,
+          width: HANDLE_CORNER, height: HANDLE_CORNER,
+          cursor: 'nwse-resize', touchAction: 'none', opacity: 0.45,
+          background: 'repeating-linear-gradient(135deg, transparent 0 3px, var(--dsw-alias-label-secondary, #888) 3px 4.5px)',
+          borderBottomRightRadius: 13,
+        },
+        handleEdge: {
+          position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
+          width: HANDLE_EDGE, height: 28,
+          cursor: 'ew-resize', touchAction: 'none', opacity: 0.45,
+          borderRadius: '3px 0 0 3px',
+          background: 'var(--dsw-alias-label-secondary, #888)',
+        },
       }
 
       // ── 隐藏态：只留一个小胶囊，避免占着屏幕又找不回来 ───────────────────
@@ -930,7 +1112,7 @@ window.__ModuleLoader__.load({
         return h('div', {
           'data-ofm-credit-watch': 'pill',
           style: {
-            ...style.panel, width: 'auto',
+            ...style.panel, width: 'auto', height: 'auto',
             left: leftOf(pos, typeof window.innerWidth === 'number' ? window.innerWidth : 1280, 96),
             borderRadius: 999,
           },
@@ -1093,7 +1275,24 @@ window.__ModuleLoader__.load({
           h('span', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
             // 有隐藏项时明说一句，免得"渠道怎么变少了"看起来像故障。
             hiddenCount > 0 ? h('span', null, fill(t('hiddenCount'), { count: hiddenCount })) : null,
-            failedCount > 0 ? h('span', { style: { color: 'var(--dsw-alias-state-error-primary, #d33)' } }, `⚠ ${failedCount}`) : null)))
+            failedCount > 0 ? h('span', { style: { color: 'var(--dsw-alias-state-error-primary, #d33)' } }, `⚠ ${failedCount}`) : null)),
+        // 缩放手柄。绝对定位，不占列表的流；折叠态由处理器自己忽略纵向分量。
+        h('div', {
+          'data-ofm-credit-watch-handle': 'corner',
+          style: style.handleCorner,
+          title: t('resizeCorner'),
+          onPointerEnter: event => { event.currentTarget.style.opacity = '0.85' },
+          onPointerLeave: event => { event.currentTarget.style.opacity = '0.45' },
+          ...cornerHandlers,
+        }),
+        h('div', {
+          'data-ofm-credit-watch-handle': 'edge',
+          style: style.handleEdge,
+          title: t('resizeEdge'),
+          onPointerEnter: event => { event.currentTarget.style.opacity = '0.85' },
+          onPointerLeave: event => { event.currentTarget.style.opacity = '0.45' },
+          ...edgeHandlers,
+        }))
     }
 
     // ─── 插件体 ──────────────────────────────────────────────────────────────
@@ -1122,6 +1321,8 @@ window.__ModuleLoader__.load({
       normalizeHidden, toggleHidden, CHANNELS, DICT, HIDDEN_KEY,
       formatAmount, unitOf, toneOf, expireOf, tooltipOf, normalizeTotals,
       accumulateLocal, loadLocalDaily, loadPos, leftOf, localDate, round2,
+      loadSize, saveSize, clampSize, relRightFor, sizeLimits,
+      SIZE_KEY, MIN_WIDTH, MIN_HEIGHT,
     }
     return module.exports
   },

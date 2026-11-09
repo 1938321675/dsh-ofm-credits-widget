@@ -143,7 +143,7 @@ function fullRows() {
 const IDX = {
   lang: 0, rows: 1, delta: 2, lastSpent: 3, loading: 4, updatedAt: 5,
   error: 6, now: 7, pos: 8, collapsed: 9, hidden: 10, hiddenIds: 11, configOpen: 12,
-  today: 13,
+  today: 13, size: 14,
 }
 
 // ── 1. 全部可见 ───────────────────────────────────────────────────────────
@@ -281,6 +281,47 @@ check('收起时不显示配置面板',
   const amountNode = flatten(tree).find(node =>
     node.props !== undefined && node.props.title !== undefined && String(node.props.title).includes('凭据未配置'))
   check('失败原因进了 tooltip', amountNode !== undefined, true)
+}
+
+// ── 11. poll 的账本回退链路 ───────────────────────────────────────────────
+// ── 12. 缩放手柄与尺寸 ────────────────────────────────────────────────────
+// 尺寸状态落到卡片 style，两个手柄各自带上自己的光标；折叠时高度回落自适应，
+// 否则收起后下面会留一片空白。
+{
+  const nodes = overrides => flatten(render(overrides))
+  const panelOf = overrides => nodes(overrides)
+    .find(node => node.props !== undefined && node.props['data-ofm-credit-watch'] === 'panel')
+  const handlesOf = overrides => nodes(overrides)
+    .filter(node => node.props !== undefined && node.props['data-ofm-credit-watch-handle'] !== undefined)
+    .map(node => [node.props['data-ofm-credit-watch-handle'], node.props.style?.cursor])
+
+  check('没拖过时用默认宽度', panelOf({}).props.style.width, 340)
+  check('没拖过时高度自适应', panelOf({}).props.style.height, 'auto')
+  const sized = panelOf({ [IDX.size]: { width: 480, height: 320 } }).props.style
+  check('尺寸状态落到宽度', sized.width, 480)
+  check('尺寸状态落到高度', sized.height, 320)
+
+  check('只调宽度时高度仍自适应',
+    panelOf({ [IDX.size]: { width: 480, height: null } }).props.style.height, 'auto')
+  check('折叠时高度回落自适应',
+    panelOf({ [IDX.size]: { width: 480, height: 320 }, [IDX.collapsed]: true }).props.style.height, 'auto')
+
+  check('两个手柄都在且光标各自正确', handlesOf({}),
+    [['corner', 'nwse-resize'], ['edge', 'ew-resize']])
+
+  const corner = nodes({}).find(node => node.props?.['data-ofm-credit-watch-handle'] === 'corner')
+  check('拖拽角贴在右下角',
+    [corner.props.style.position, corner.props.style.right, corner.props.style.bottom], ['absolute', 0, 0])
+  check('拖拽角可双击复位', typeof corner.props.onDoubleClick, 'function')
+
+  const edge = nodes({}).find(node => node.props?.['data-ofm-credit-watch-handle'] === 'edge')
+  check('右边缘手柄贴右边且垂直居中',
+    [edge.props.style.position, edge.props.style.right, edge.props.style.top], ['absolute', 0, '50%'])
+  check('右边缘手柄也能双击复位', typeof edge.props.onDoubleClick, 'function')
+
+  // 隐藏态只留一个小胶囊，没有可拉的边。
+  check('隐藏态不渲染手柄',
+    nodes({ [IDX.hidden]: true }).filter(node => node.props?.['data-ofm-credit-watch-handle'] !== undefined).length, 0)
 }
 
 // ── 11. poll 的账本回退链路 ───────────────────────────────────────────────
