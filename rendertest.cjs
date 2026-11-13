@@ -41,6 +41,7 @@ global.document = {
 let stateOverrides = {}
 let hooks = []
 let cursor = 0
+let effectCapture = null
 
 const React = {
   createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat() }),
@@ -55,6 +56,7 @@ const React = {
   },
   useEffect(fn) {
     const index = cursor++
+    if (effectCapture) effectCapture.push(fn)
     if (!(index in hooks)) hooks[index] = true
   },
   useRef(value) {
@@ -144,6 +146,26 @@ const IDX = {
   lang: 0, rows: 1, delta: 2, lastSpent: 3, loading: 4, updatedAt: 5,
   error: 6, now: 7, pos: 8, collapsed: 9, hidden: 10, hiddenIds: 11, configOpen: 12,
   today: 13, size: 14,
+  // WorkBuddy 分区：接在 size 之后，前十五个下标不受影响。
+  wbRows: 15, wbLedger: 16, wbConnected: 17, wbOpen: 18,
+}
+
+/** WorkBuddy 分区节点。 */
+function wbSectionOf(tree) {
+  return flatten(tree).find(node => node.props !== undefined && node.props['data-ofm-credit-watch-wb'] !== undefined)
+}
+
+/** 数出 WorkBuddy 的账号行。 */
+function countWbRows(tree) {
+  return flatten(tree).filter(node => node.props !== undefined && node.props['data-wb-account'] !== undefined).length
+}
+
+function wbRows() {
+  return [
+    { key: 'wb:cn:a1', region: 'cn', id: 'a1', name: '林岳森', selected: true, credits: 1200 },
+    { key: 'wb:cn:a2', region: 'cn', id: 'a2', name: '133****4193', selected: false, credits: null },
+    { key: 'wb:global:b1', region: 'global', id: 'b1', name: 'global-1', selected: false, credits: 88 },
+  ]
 }
 
 // ── 1. 全部可见 ───────────────────────────────────────────────────────────
@@ -187,6 +209,43 @@ check('收起时不显示配置面板',
     && node.props.type === 'checkbox')
   check('配置面板列出全部 10 个渠道（即使全被隐藏）', options.length, 10)
   check('全隐藏时所有勾选框都未选中', options.every(option => option.props.checked === false), true)
+}
+
+// ── 4b. WorkBuddy 分区 ────────────────────────────────────────────────────
+// 未连接时给一句说明；连上但收起时只有头部；展开才逐账号列。
+{
+  const disconnected = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.wbConnected]: false })
+  check('未连接 WorkBuddy 时分区标记为 unavailable',
+    wbSectionOf(disconnected)?.props['data-ofm-credit-watch-wb'], 'unavailable')
+  check('未连接时不渲染账号行', countWbRows(disconnected), 0)
+
+  const collapsed = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.wbRows]: wbRows(), [IDX.wbOpen]: false,
+  })
+  check('收起时不渲染账号行', countWbRows(collapsed), 0)
+  check('收起时仍显示头部', wbSectionOf(collapsed)?.props['data-ofm-credit-watch-wb'], 'section')
+
+  const expanded = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.wbRows]: wbRows(), [IDX.wbOpen]: true,
+    [IDX.wbLedger]: { daily: { 'wb:cn:a1': 30 }, cumulative: { 'wb:cn:a1': 130 } },
+  })
+  check('展开后每个账号一行', countWbRows(expanded), 3)
+
+  // 有账号但一个积分都读不到：行仍然在（面板的职责是让人看到有哪些号）。
+  const empty = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.wbRows]: wbRows(), [IDX.wbOpen]: true,
+  })
+  check('读不到积分时账号行照常列出', countWbRows(empty), 3)
+
+  // 隐藏 OFM 渠道不影响 WorkBuddy 分区——两套上游互不牵连。
+  const allHiddenOfm = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(allIds),
+    [IDX.wbRows]: wbRows(), [IDX.wbOpen]: true,
+  })
+  check('OFM 渠道全隐藏时 WorkingBuddy 行仍在', countWbRows(allHiddenOfm), 3)
 }
 
 // ── 5. 隐藏后合计与列表一致 ───────────────────────────────────────────────
@@ -392,6 +451,65 @@ check('收起时不显示配置面板',
   global.document.querySelector = originQuery
   store.delete('ofm-credit-watch.position')
   store.delete('ofm-credit-watch.size')
+}
+
+// ── 标题栏按钮的命中范围 ─────────────────────────────────────────────────
+{
+  const tree = render({ [IDX.rows]: fullRows() })
+  const nodes = flatten(tree)
+  const titles = ['立即刷新', '选择显示哪些渠道', '收起', '隐藏']
+  const buttons = titles.map(title => nodes.find(node => node.type === 'button' && node.props.title === title))
+  check('标题栏四个按钮都存在', buttons.every(Boolean), true)
+  check('四个按钮均提供 30px 命中范围且不会被压缩',
+    buttons.map(button => [button.props.style.width, button.props.style.height, button.props.style.flex]),
+    titles.map(() => [30, 30, '0 0 30px']))
+  check('四个按钮仍有点击处理', buttons.every(button => typeof button.props.onClick === 'function'), true)
+  let stopped = 0
+  for (const button of buttons) button.props.onPointerDown({ stopPropagation() { stopped += 1 } })
+  check('按下按钮不会触发标题栏拖动', stopped, 4)
+  const head = nodes.find(node => node.props?.style?.cursor === 'grab')
+  check('标题栏右侧避让右上角缩放热区', head.props.style.padding, '9px 16px 8px 10px')
+  check('缩放热区仍然存在', nodes.filter(node => node.props?.['data-ofm-credit-watch-handle']).length, 8)
+}
+
+// ── 重启后折叠态遇到窗口尺寸变化 ─────────────────────────────────────────
+{
+  const originalQuery = document.querySelector
+  const originalAdd = window.addEventListener
+  const originalRemove = window.removeEventListener
+  const effects = []
+  const listeners = {}
+  const root = { style: {} }
+  effectCapture = effects
+  document.querySelector = selector => selector.includes('ofm-credit-watch') ? root : null
+  window.addEventListener = (name, fn) => { listeners[name] = fn }
+  window.removeEventListener = () => {}
+  store.set('ofm-credit-watch.collapsed', '1')
+  store.set('ofm-credit-watch.size', JSON.stringify({ width: 340, height: 320 }))
+  try {
+    const tree = render({ [IDX.rows]: fullRows() })
+    check('重启后恢复折叠状态', countRows(tree), 0)
+    check('重启后折叠卡片高度自适应', tree.props.style.height, 'auto')
+    effects.find(fn => String(fn).includes("window.addEventListener('resize'"))()
+    listeners.resize()
+    check('折叠状态下窗口尺寸变化不会撑开卡片', root.style.height, 'auto')
+    check('窗口尺寸变化保留展开高度', hooks[IDX.size].height, 320)
+    const toggle = flatten(tree).find(node => node.type === 'button' && node.props.title === '展开')
+    toggle.props.onClick({ stopPropagation() {} })
+    cursor = 0
+    const expanded = t.CreditWatch({ ctx: {} })
+    check('展开后恢复列表', countRows(expanded), 10)
+    check('展开后恢复原来的高度', expanded.props.style.height, 320)
+    check('展开状态写入持久化存储', store.get('ofm-credit-watch.collapsed'), '0')
+  } finally {
+    effectCapture = null
+    document.querySelector = originalQuery
+    window.addEventListener = originalAdd
+    window.removeEventListener = originalRemove
+    store.delete('ofm-credit-watch.collapsed')
+    store.delete('ofm-credit-watch.size')
+    store.delete('ofm-credit-watch.position')
+  }
 }
 
 // ── 11. poll 的账本回退链路 ───────────────────────────────────────────────

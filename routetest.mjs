@@ -146,6 +146,36 @@ async function main() {
       check('readings 非数组不破坏账本', (await res.json()).totals.qoder, 60)
     }
 
+    // ── WorkBuddy 账本：/wb ──
+    {
+      const empty = await (await fetch(`${base}/wb`)).json()
+      check('GET wb 空账本 daily 为空', empty.daily, {})
+      check('GET wb 空账本 cumulative 为空', empty.cumulative, {})
+
+      const key = 'wb:cn:a1'
+      const first = await (await fetch(`${base}/wb`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ readings: [{ key, total: 500 }] }),
+      })).json()
+      check('wb 首轮不记账', first.deltas[key], 0)
+
+      const second = await (await fetch(`${base}/wb`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ readings: [{ key, total: 420 }] }),
+      })).json()
+      check('wb 第二轮当日 80', second.daily[key], 80)
+      check('wb 第二轮累计 80', second.cumulative[key], 80)
+
+      const snapshot = await (await fetch(`${base}/wb`)).json()
+      check('GET wb 读到累计', snapshot.cumulative[key], 80)
+      check('GET wb 读到当日', snapshot.daily[key], 80)
+
+      const bad = await fetch(`${base}/wb`, { method: 'DELETE' })
+      check('wb DELETE 返回 405', bad.status, 405)
+    }
+
     // ── 方法不支持 ──
     {
       const res = await fetch(`${base}/ledger`, { method: 'DELETE' })
@@ -183,10 +213,14 @@ async function main() {
     }
 
     // 确认数据确实写到了临时目录，而不是用户真实账本。
+    // OFM 渠道与 WorkBuddy 各两个基准文件 + 各自的当日账本；
+    // 目录里不该有第五种之外的东西。
     const files = fs.readdirSync(temp)
     checkTrue('账本落在指定目录', files.includes('last.json'))
     checkTrue('当日账本文件已生成', files.some(name => name.startsWith('daily-')))
-    check('未在临时目录之外写文件', files.length, 2)
+    checkTrue('WorkBuddy 账本文件已生成', files.includes('wb-last.json') && files.includes('wb-total.json'))
+    checkTrue('WorkBuddy 当日账本已生成', files.some(name => name.startsWith('wb-daily-')))
+    check('目录里只有这两套账本', files.length, 5)
   } finally {
     await new Promise(resolve => server.close(resolve))
   }

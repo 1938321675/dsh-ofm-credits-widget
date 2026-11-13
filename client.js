@@ -58,6 +58,8 @@ window.__ModuleLoader__.load({
     const RPC_TIMEOUT_MS = 90_000
     /** 位置持久化键。 */
     const POS_KEY = 'ofm-credit-watch.position'
+    /** WorkBuddy 分区展开状态持久化键。 */
+    const WB_OPEN_KEY = 'ofm-credit-watch.wbOpen'
     /** 折叠状态持久化键。 */
     const COLLAPSE_KEY = 'ofm-credit-watch.collapsed'
     /** 被用户隐藏的渠道 id 列表持久化键。存「隐藏」而不是「显示」：
@@ -111,6 +113,68 @@ window.__ModuleLoader__.load({
      */
     const UNIT_BY_PROVIDER = { cline: 'USD', zcode: 'token', gemini: '%' }
 
+    /** 单轮同时打几个渠道的上游：十家一起发容易同时抖动，也更容易被限流。 */
+    const MAX_CONCURRENCY = 4
+    /** 被隐藏的渠道降频到这个间隔：看不见的渠道不必每分钟占用一次上游往返。 */
+    const HIDDEN_POLL_MS = 5 * 60_000
+    /** 失败行沿用旧读数的最长时间；超过它宁可显示"没有数据"，也不展示过期数字。 */
+    const STALE_ROW_MS = 30 * 60_000
+
+    /**
+     * 有并发上限的 map。
+     *
+     * 结果保序：返回数组与输入一一对应，调用方仍按 CHANNELS 的顺序取值。
+     * 单项抛错由 `task` 自己收敛，这里不做 catch——与 Promise.all 的语义一致。
+     */
+    async function mapLimit(items, limit, task) {
+      const results = new Array(items.length)
+      let cursor = 0
+      const worker = async () => {
+        for (;;) {
+          const index = cursor
+          cursor += 1
+          if (index >= items.length) return
+          results[index] = await task(items[index], index)
+        }
+      }
+      const width = Math.max(1, Math.min(limit, items.length))
+      await Promise.all(Array.from({ length: width }, worker))
+      return results
+    }
+
+    /**
+     * 这一轮要不要查这个渠道。
+     *
+     * 隐藏只影响显示，但没显示的渠道没必要每分钟都往上打一次：降频到
+     * HIDDEN_POLL_MS，勾回来的时候最多等一个间隔就有新数字。从未查过的
+     * 渠道永远查——否则刚隐藏的渠道会一直停在"没有数据"。
+     */
+    function shouldPollChannel(hidden, lastAt, at) {
+      if (!hidden) return true
+      if (!Number.isFinite(lastAt)) return true
+      return at - lastAt >= HIDDEN_POLL_MS
+    }
+
+    /**
+     * 失败时这一行怎么显示。
+     *
+     * 上游抖动一次就清空数字会让悬浮窗闪烁，所以沿用上一轮读数；但沿用
+     * 必须有期限——半小时读不到，那个数字已经不能代表"现在还剩多少"，
+     * 这时改成没有数据，并保留失败标记让人知道是查不到而不是花光了。
+     */
+    function failureRow(before, at) {
+      const lastOkAt = Number.isFinite(before?.lastOkAt) ? before.lastOkAt : 0
+      const fresh = lastOkAt > 0 && at - lastOkAt <= STALE_ROW_MS
+      return {
+        total: fresh && Number.isFinite(before?.total) ? before.total : null,
+        accounts: before?.accounts ?? 0,
+        unit: before?.unit ?? 'credits',
+        packages: before?.packages ?? [],
+        lastOkAt,
+        stale: !fresh,
+      }
+    }
+
     // ─── 文案 ────────────────────────────────────────────────────────────────
     const DICT = {
       zh: {
@@ -154,6 +218,16 @@ window.__ModuleLoader__.load({
         unitToken: 'token',
         expireOn: '{date} 过期',
         packageLine: '{name} {remaining}/{total}',
+        wbTitle: 'WorkBuddy 账号',
+        wbToday: '今日',
+        wbTotal: '累计',
+        wbUnavailable: '未连接 WorkBuddy',
+        wbNoAccounts: '没有账号',
+        wbNoCredits: '未返回积分',
+        wbExpand: '展开账号消耗',
+        wbCollapse: '收起账号消耗',
+        wbRegionCn: '国内版',
+        wbRegionGlobal: '国际版',
       },
       en: {
         title: 'OFM Credit Watch',
@@ -196,6 +270,16 @@ window.__ModuleLoader__.load({
         unitToken: 'tokens',
         expireOn: 'expires {date}',
         packageLine: '{name} {remaining}/{total}',
+        wbTitle: 'WorkBuddy accounts',
+        wbToday: 'today',
+        wbTotal: 'total',
+        wbUnavailable: 'WorkBuddy not connected',
+        wbNoAccounts: 'no account',
+        wbNoCredits: 'no credits returned',
+        wbExpand: 'Show per-account spend',
+        wbCollapse: 'Hide per-account spend',
+        wbRegionCn: 'CN',
+        wbRegionGlobal: 'Global',
       },
     }
 
@@ -634,6 +718,97 @@ window.__ModuleLoader__.load({
       return normalizeTotals(data?.totals)
     }
 
+    // ─── WorkBuddy 账号积分 ──────────────────────────────────────────────────
+
+    /**
+     * WorkBuddy 的采样节奏与 OFM 渠道分开。
+     *
+     * 它的成本结构不同：每个账号一次上游读取，账号越多越贵。五分钟一轮
+     * 足够看清"今天花了多少"，而每分钟一轮会把这个面板变成上游的主要
+     * 压力来源。
+     */
+    const WB_POLL_MS = 5 * 60_000
+
+    /** 国内版与国际版是两条并行上游，各自一份账号列表。 */
+    const WB_REGIONS = ['cn', 'global']
+
+    /** WorkBuddy 插件提供的只读路由；插件没装或停用时它会 404。 */
+    function wbCreditsUrl(region) {
+      return `/plugins/dsh-connect-workbuddy/account-credits?region=${region}`
+    }
+
+    /** 账本里一个账号的键：带区域，两个区域同号也不会串账。 */
+    function wbLedgerKey(region, accountId) {
+      return `wb:${region}:${accountId}`
+    }
+
+    /**
+     * 读一个区域的全部账号及其积分。
+     *
+     * 返回 `null` 表示这个区域不可用（插件没装、路由 404、网络异常）——
+     * 与"有账号但都读不到积分"区分开，前者整块显示未连接，后者逐行显示
+     * 没有数据。账号的 `credits` 缺失就是读不到（插件刻意不给 0），
+     * 这里保持同样的语义。
+     */
+    async function fetchWorkBuddyRegion(region) {
+      const res = await fetch(wbCreditsUrl(region), { cache: 'no-store' })
+      if (!res.ok) return null
+      const data = await res.json()
+      const list = Array.isArray(data?.accounts) ? data.accounts : []
+      return list.map(account => ({
+        key: wbLedgerKey(region, String(account?.id ?? '')),
+        region,
+        id: String(account?.id ?? ''),
+        name: typeof account?.accountName === 'string' && account.accountName !== ''
+          ? account.accountName
+          : String(account?.id ?? ''),
+        selected: account?.selected === true,
+        credits: Number.isFinite(account?.credits) ? account.credits : null,
+      }))
+    }
+
+    /** 拉 WorkBuddy 账本（今日 + 累计）。Host 没有这条路由时调用方会退到只显示余额。 */
+    async function fetchWorkBuddyLedger() {
+      const res = await fetch(`${LEDGER_URL.replace(/\/ledger$/, '')}/wb`, { cache: 'no-store' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      return normalizeWorkBuddy(await res.json())
+    }
+
+    /** 报一轮 WorkBuddy 读数，拿回 Host 算好的今日与累计。 */
+    async function postWorkBuddyLedger(readings) {
+      const res = await fetch(`${LEDGER_URL.replace(/\/ledger$/, '')}/wb`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ readings }),
+        cache: 'no-store',
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      return normalizeWorkBuddy(await res.json())
+    }
+
+    /**
+     * 把若干个可能的消耗值加起来。
+     *
+     * 全都没有数字时返回 null，而不是 0——「没记到账」与「今天一分没花」
+     * 是两件事，界面上要能分开显示。
+     */
+    function sumSpend(values) {
+      let sum = 0
+      let seen = false
+      for (const value of values) {
+        if (Number.isFinite(value)) { sum += value; seen = true }
+      }
+      return seen ? Math.round(sum * 100) / 100 : null
+    }
+
+    /** 把账本响应收敛成两张只含数字的表。 */
+    function normalizeWorkBuddy(raw) {
+      return {
+        daily: normalizeTotals(raw?.daily),
+        cumulative: normalizeTotals(raw?.cumulative),
+      }
+    }
+
     /** tooltip：账号 + 各积分包构成。 */
     function tooltipOf(row) {
       const lines = []
@@ -709,12 +884,25 @@ window.__ModuleLoader__.load({
       // 固定下来，因此老用户升级后看到的卡片与原来一样高。
       const [size, setSize] = useState(loadSize)
 
+      // WorkBuddy 账号：各行读数、账本（今日/累计）、是否展开、是否连得上。
+      // 与 OFM 渠道完全独立——它有自己的节拍与账本，WorkBuddy 没装时
+      // 不影响 OFM 那半边的任何行为。
+      const [wbRows, setWbRows] = useState([])
+      const [wbLedger, setWbLedger] = useState({ daily: {}, cumulative: {} })
+      const [wbConnected, setWbConnected] = useState(true)
+      const [wbOpen, setWbOpen] = useState(() => {
+        try { return window.localStorage?.getItem(WB_OPEN_KEY) === '1' } catch { return false }
+      })
+
       // 上一轮读数与串行保护：轮询和手动刷新可能重叠，只允许最新一轮落库。
       const previous = useRef(null)
       const generation = useRef(0)
       const alive = useRef(true)
       // 账本走 Host 还是本地兜底，决定 delta 记到哪儿。
       const ledgerMode = useRef('host')
+
+      // WorkBuddy 的采样代次：与渠道轮询的 generation 分开，两套节拍互不打断。
+      const wbGeneration = useRef(0)
 
       const persistPos = useCallback(next => {
         setPos(next)
@@ -756,17 +944,19 @@ window.__ModuleLoader__.load({
           try { window.localStorage?.setItem(POS_KEY, JSON.stringify(merged)) } catch { /* 存储不可用 */ }
           return merged
         })
-        const root = document.querySelector('[data-ofm-credit-watch]')
+        const root = document.querySelector('[data-ofm-credit-watch="panel"]')
         if (root) {
           root.style.width = `${next.width}px`
-          root.style.height = next.height === null ? '' : `${next.height}px`
+          // 折叠时不能把保存的展开高度写回 DOM，否则重启后的窗口尺寸事件
+          // 会把只有标题栏的卡片撑出一大片空白。
+          root.style.height = collapsed || next.height === null ? 'auto' : `${next.height}px`
           root.style.left = `${left}px`
           // 上边界同样要同步写。高度立刻变了、上边界还在等重渲染时，中间态
           // 就是"新高度 + 旧上边界"，底边被推出去；pointermove 属于 continuous
           // 事件，重渲染不保证赶在同一次绘制之前，中间态会被画出来。
           if (top !== null) root.style.top = `${top}px`
         }
-      }, [])
+      }, [collapsed])
 
       /**
        * 写回隐藏集合。先更新界面再落盘：即使 localStorage 不可用（隐私模式、
@@ -784,37 +974,51 @@ window.__ModuleLoader__.load({
         generation.current = seq
         setLoading(true)
         setError('')
-        // 一个渠道失败不该拖垮整轮：各自 settled，失败的行保留上一轮的读数，
-        // 这样悬浮窗不会因为某一家上游抖动就整片变空。
-        const results = await Promise.all(CHANNELS.map(async channel => {
+        // 一个渠道失败不该拖垮整轮：各自 settled，失败的行按 failureRow 的
+        // 时效规则决定是沿用还是改显没有数据。
+        //
+        // 隐藏渠道降频：看不见的渠道不必每分钟占用一次上游往返；本轮跳过的
+        // 渠道返回 `skip`，下面渲染时原样保留上一行。
+        const roundAt = Date.now()
+        const results = await mapLimit(CHANNELS, MAX_CONCURRENCY, async channel => {
+          const before = previous.current?.find(item => item.id === channel.id)
+          // 用上一轮的采样时间（at），不是上一次成功的时间：失败也算查过，
+          // 否则一个坏掉的隐藏渠道会每轮都被重试。
+          if (!shouldPollChannel(hiddenIds.has(channel.id), before?.at, roundAt)) {
+            return { channel, skip: true }
+          }
           try {
             const reading = await readChannel(ctx, channel)
             return { channel, ok: true, reading }
           } catch (caught) {
             return { channel, ok: false, message: String(caught?.message ?? caught) }
           }
-        }))
+        })
         if (!alive.current || seq !== generation.current) return
 
         const stamp = Date.now()
         const prev = previous.current
         const freshDelta = {}
         const spentAt = {}
-        const nextRows = results.map(({ channel, ok, reading, message }) => {
+        const nextRows = results.map(({ channel, ok, reading, message, skip }) => {
+          const before = prev?.find(item => item.id === channel.id)
+          // 本轮跳过的隐藏渠道：整行原样留着，连带上一次的成功时间戳。
+          if (skip) {
+            return before ?? {
+              id: channel.id, ...channel, ok: true, at: stamp, lastOkAt: 0,
+              total: null, accounts: 0, failed: 0,
+              unit: UNIT_BY_PROVIDER[channel.id] ?? 'credits', packages: [],
+            }
+          }
           const row = { id: channel.id, ...channel, ok, at: stamp }
           if (!ok) {
-            // 失败：沿用上一轮已知的剩余，但标记失败，避免数字凭空消失。
-            // 失败原因要带到行上，tooltip 才有东西可说。
-            const before = prev?.find(item => item.id === channel.id)
+            // 失败：按 failureRow 的时效规则决定沿用还是清空——沿用过头会把
+            // 半小时前的余额当成"现在还剩多少"。原因要带到行上给 tooltip。
             return {
               ...row,
-              total: before?.total ?? null,
-              accounts: before?.accounts ?? 0,
+              ...failureRow(before, stamp),
               failed: 1,
-              stale: true,
               error: message,
-              unit: before?.unit ?? UNIT_BY_PROVIDER[channel.id] ?? 'credits',
-              packages: before?.packages ?? [],
             }
           }
           row.total = reading.total
@@ -822,7 +1026,7 @@ window.__ModuleLoader__.load({
           row.failed = reading.failed
           row.unit = reading.unit
           row.packages = reading.packages
-          const before = prev?.find(item => item.id === channel.id)
+          row.lastOkAt = stamp
           // 只有上一轮也报出过数字、且本轮更低时才算消耗。领积分会让余额上升，
           // 那不是负消耗，不该出现在「本分钟」栏里。
           if (before && Number.isFinite(before.total) && Number.isFinite(row.total) && row.total < before.total) {
@@ -839,9 +1043,10 @@ window.__ModuleLoader__.load({
         }
 
         // 账本：读数交给 Host 累计；Host 不可用就退到本地兜底。
-        const readings = results.map(({ channel, ok, reading }) => ({
+        // 跳过的渠道报 null——本轮没有新读数，让 Host 保持原基准不动。
+        const readings = results.map(({ channel, ok, reading, skip }) => ({
           provider: channel.id,
-          total: ok ? reading.total : null,
+          total: ok && !skip ? reading.total : null,
         }))
         let totals = null
         try {
@@ -856,8 +1061,11 @@ window.__ModuleLoader__.load({
 
         setUpdatedAt(stamp)
         setLoading(false)
-        if (results.every(item => !item.ok)) setError(t('retryOnNext'))
-      }, [ctx, t])
+        // 只有真正查过且全失败才算整体出错；全部跳过（都隐藏且未到重查间隔）
+        // 不是故障，别在标题栏报红。
+        const attempted = results.filter(item => item.skip !== true)
+        if (attempted.length > 0 && attempted.every(item => !item.ok)) setError(t('retryOnNext'))
+      }, [ctx, t, hiddenIds])
 
       useEffect(() => {
         alive.current = true
@@ -893,6 +1101,64 @@ window.__ModuleLoader__.load({
         document.addEventListener('visibilitychange', onVisibility)
         return () => { stop(); document.removeEventListener('visibilitychange', onVisibility) }
       }, [poll])
+
+      /**
+       * 采一轮 WorkBuddy：读两个区域的账号积分，交给 Host 记账，取回今日与累计。
+       *
+       * 报给账本的是"每个账号当前的积分总量"。跳不跳过一个账号由 Host 判断
+       * （读不到就不动基准），这里只如实上报 null，不自作主张填 0。
+       */
+      const pollWorkBuddy = useCallback(async () => {
+        const seq = wbGeneration.current + 1
+        wbGeneration.current = seq
+        const regions = await Promise.all(WB_REGIONS.map(async region => {
+          try { return await fetchWorkBuddyRegion(region) } catch { return null }
+        }))
+        if (!alive.current || seq !== wbGeneration.current) return
+        // 两个区域都取不到才叫"没连上"：只有一个区域有账号时另一个本就返回空。
+        const connected = regions.some(list => list !== null)
+        const rows = connected ? regions.flatMap(list => list ?? []) : []
+        setWbConnected(connected)
+        setWbRows(rows)
+        if (!connected) return
+
+        try {
+          const ledger = await postWorkBuddyLedger(rows.map(row => ({ key: row.key, total: row.credits })))
+          if (!alive.current || seq !== wbGeneration.current) return
+          setWbLedger(ledger)
+        } catch {
+          // Host 账本不可用：余额照旧显示，消耗列留空，而不是让整块消失。
+        }
+      }, [])
+
+      useEffect(() => {
+        alive.current = true
+        // 先取一次账本，让刚打开窗口时就能看到今天早些时候的累计。
+        void fetchWorkBuddyLedger().then(ledger => {
+          if (alive.current) setWbLedger(ledger)
+        }).catch(() => { /* Host 没有 wb 账本路由，等采样时再试 */ })
+        void pollWorkBuddy()
+        let timer
+        const start = () => {
+          if (timer !== undefined) return
+          timer = window.setInterval(() => { void pollWorkBuddy() }, WB_POLL_MS)
+        }
+        const stop = () => {
+          if (timer === undefined) return
+          window.clearInterval(timer)
+          timer = undefined
+        }
+        // 与 OFM 轮询同一套可见性规则：看不见的时候不采样。
+        const onVisibility = () => {
+          if (document.visibilityState === 'visible') { void pollWorkBuddy(); start() } else { stop() }
+        }
+        start()
+        document.addEventListener('visibilitychange', onVisibility)
+        return () => {
+          stop()
+          document.removeEventListener('visibilitychange', onVisibility)
+        }
+      }, [pollWorkBuddy])
 
       // 每 10 秒走一次"现在"，让"3 分钟前有消耗"这类相对时间自己走字，
       // 而不用为了刷新相对时间重发 RPC。
@@ -1092,17 +1358,21 @@ window.__ModuleLoader__.load({
         head: {
           display: 'flex',
           alignItems: 'center',
-          gap: 8,
-          padding: '9px 10px 8px',
+          gap: 4,
+          // 右上角缩放热区宽 14px，标题栏右侧让出空间给它。
+          padding: '9px 16px 8px 10px',
           cursor: 'grab',
           flexShrink: 0,
           borderBottom: collapsed ? 'none' : '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))',
           touchAction: 'none',
         },
-        title: { fontWeight: 600, fontSize: 12.5, whiteSpace: 'nowrap' },
-        sub: { color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 11, whiteSpace: 'nowrap' },
+        title: { fontWeight: 600, fontSize: 12.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+        sub: { color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
         iconBtn: {
-          border: 'none', background: 'transparent', cursor: 'pointer', padding: '2px 4px',
+          // 扩大透明按钮本身的命中范围，图标大小保持不变；不允许 flex 压缩。
+          width: 30, height: 30, flex: '0 0 30px', padding: 0,
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          border: 'none', background: 'transparent', cursor: 'pointer',
           color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 13, lineHeight: 1, borderRadius: 6,
         },
         // 高度自适应时列表最多 320 高；用户拉过右下角之后改成吃满剩余空间。
@@ -1166,6 +1436,31 @@ window.__ModuleLoader__.load({
         },
         // 八个缩放热区：平时完全透明（卡片看起来没有任何装饰），鼠标贴到边上
         // 才由处理器刷上提示色。角排在边之后、层级更高，重叠处归角。
+        // WorkBuddy 分区：与渠道行同一套视觉语言，多一列"当前余额"。
+        wbWrap: { borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))' },
+        wbHead: {
+          display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
+          cursor: 'pointer', fontSize: 11.5, fontWeight: 600,
+        },
+        wbTitle: { whiteSpace: 'nowrap' },
+        wbSum: {
+          marginLeft: 'auto', fontSize: 10.5, fontWeight: 400,
+          color: 'var(--dsw-alias-label-secondary, #888)', fontVariantNumeric: 'tabular-nums',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        },
+        // 四列：账号 / 今日 / 累计 / 余额。与渠道行对齐，右三列都右对齐。
+        wbRow: {
+          display: 'grid', gridTemplateColumns: '1fr 48px 48px 56px',
+          alignItems: 'center', gap: 8, padding: '4px 10px',
+        },
+        wbNameCell: { minWidth: 0, display: 'flex', flexDirection: 'column' },
+        wbName: { fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+        wbCell: {
+          textAlign: 'right', fontSize: 10.5, fontVariantNumeric: 'tabular-nums',
+          color: 'var(--dsw-alias-label-secondary, #888)', whiteSpace: 'nowrap',
+        },
+        wbAmount: { textAlign: 'right', fontSize: 11.5, fontWeight: 600, fontVariantNumeric: 'tabular-nums' },
+        wbEmpty: { padding: '2px 10px 8px', color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 10.5 },
         handle: dir => ({
           position: 'absolute',
           zIndex: dir.length === 2 ? 2 : 1,
@@ -1175,6 +1470,58 @@ window.__ModuleLoader__.load({
           ...HANDLE_BOX[dir],
         }),
       }
+
+      // ── WorkBuddy 分区 ──────────────────────────────────────────────────
+      // 与渠道列表共用同一个滚动区：卡片拉高时一起滚，不额外占一条滚动条。
+      // 头部常驻，折叠时只留汇总数字，展开才逐账号列。
+      const wbTodaySum = sumSpend(wbRows.map(row => wbLedger.daily[row.key]))
+      const wbTotalSum = sumSpend(wbRows.map(row => wbLedger.cumulative[row.key]))
+      const wbSection = (() => {
+        if (!wbConnected) {
+          return h('div', { style: style.wbWrap, 'data-ofm-credit-watch-wb': 'unavailable' },
+            h('div', { style: style.wbHead, title: t('wbUnavailable') },
+              h('span', { style: style.wbTitle }, t('wbTitle')),
+              h('span', { style: { ...style.meta, marginLeft: 'auto' } }, t('wbUnavailable'))))
+        }
+        const toggle = () => setWbOpen(open => {
+          const next = !open
+          try { window.localStorage?.setItem(WB_OPEN_KEY, next ? '1' : '0') } catch { /* 存储不可用 */ }
+          return next
+        })
+        return h('div', { style: style.wbWrap, 'data-ofm-credit-watch-wb': 'section' },
+          h('div', {
+            style: style.wbHead, onClick: toggle, role: 'button',
+            title: wbOpen ? t('wbCollapse') : t('wbExpand'),
+            'aria-expanded': wbOpen ? 'true' : 'false',
+          },
+            h('span', { style: style.wbTitle }, t('wbTitle')),
+            h('span', { style: style.wbSum },
+              wbTodaySum === null ? '—' : `${t('wbToday')} −${formatAmount(wbTodaySum, 'credits')}`,
+              wbTotalSum === null ? '' : ` · ${t('wbTotal')} −${formatAmount(wbTotalSum, 'credits')}`),
+            h('span', { style: style.meta }, wbOpen ? '▾' : '▸')),
+          wbRows.length === 0
+            ? h('div', { style: style.wbEmpty }, t('wbNoAccounts'))
+            : !wbOpen ? null : wbRows.map(row => {
+              const usedToday = wbLedger.daily[row.key]
+              const usedTotal = wbLedger.cumulative[row.key]
+              return h('div', { key: row.key, style: style.wbRow, 'data-wb-account': row.key },
+                h('span', { style: style.wbNameCell },
+                  h('span', { style: style.wbName, title: row.name }, row.name),
+                  h('span', { style: style.meta },
+                    `${row.region === 'cn' ? t('wbRegionCn') : t('wbRegionGlobal')}${
+                      row.selected ? ' · ✓' : ''}`)),
+                h('span', { style: style.wbCell },
+                  Number.isFinite(usedToday) && usedToday > 0
+                    ? `−${formatAmount(usedToday, 'credits')}`
+                    : '·'),
+                h('span', { style: style.wbCell },
+                  Number.isFinite(usedTotal) && usedTotal > 0
+                    ? `−${formatAmount(usedTotal, 'credits')}`
+                    : '·'),
+                h('span', { style: style.wbAmount },
+                  Number.isFinite(row.credits) ? formatAmount(row.credits, 'credits') : t('wbNoCredits')))
+            }))
+      })()
 
       // ── 隐藏态：只留一个小胶囊，避免占着屏幕又找不回来 ───────────────────
       if (hidden) {
@@ -1300,6 +1647,9 @@ window.__ModuleLoader__.load({
                     ? h('span', { style: style.today }, `${t('today')} −${formatAmount(todayUsed, unit)}`)
                     : null))
             }))),
+        // WorkBuddy 分区放在渠道列表之后：它是另一套上游，视觉上与上面隔开，
+        // 但共用同一个滚动区，不额外占用卡片高度。
+        wbSection,
         // 配置面板：与列表同宽就地展开，列出全部渠道（含已隐藏的），
         // 每行显示当前余额，方便判断"这个穷光蛋渠道可以藏起来"。
         collapsed || !configOpen ? null : h('div', { style: style.configPane, 'data-ofm-credit-watch-config': 'pane' },
@@ -1381,7 +1731,9 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     exports.__test = {
       CreditWatch, readChannel, channelRpc, kilo, signedKilo, span, fill,
-      normalizeHidden, toggleHidden, CHANNELS, DICT, HIDDEN_KEY,
+      normalizeHidden, toggleHidden, CHANNELS, DICT, HIDDEN_KEY, WB_OPEN_KEY,
+      mapLimit, shouldPollChannel, failureRow, sumSpend, wbLedgerKey,
+      fetchWorkBuddyRegion, normalizeWorkBuddy, MAX_CONCURRENCY, HIDDEN_POLL_MS, STALE_ROW_MS, WB_POLL_MS,
       formatAmount, unitOf, toneOf, expireOf, tooltipOf, normalizeTotals,
       accumulateLocal, loadLocalDaily, loadPos, leftOf, localDate, round2,
       loadSize, saveSize, clampSize, relRightFor, sizeLimits, resizeFromDrag,

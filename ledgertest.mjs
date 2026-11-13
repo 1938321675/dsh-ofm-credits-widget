@@ -181,6 +181,97 @@ async function main() {
     check('坏条目被跳过、好条目照算', out.totals.qoder, 20)
   }
 
+  // ── 11. WB 累计：首轮无基准不记，第二轮下降累计与当日都记 ─────────────
+  {
+    const dir = freshDir()
+    const first = t.commitWorkBuddy([{ key: t.wbKey('cn', 'a1'), total: 1000 }])
+    check('WB 首轮不记账', first.deltas[t.wbKey('cn', 'a1')], 0)
+    check('WB 首轮累计为空', first.cumulative[t.wbKey('cn', 'a1')], undefined)
+
+    const second = t.commitWorkBuddy([{ key: t.wbKey('cn', 'a1'), total: 940 }])
+    check('WB 第二轮累计 60', second.cumulative[t.wbKey('cn', 'a1')], 60)
+    check('WB 第二轮当日 60', second.daily[t.wbKey('cn', 'a1')], 60)
+
+    const third = t.commitWorkBuddy([{ key: t.wbKey('cn', 'a1'), total: 900 }])
+    check('WB 累计继续叠加', third.cumulative[t.wbKey('cn', 'a1')], 100)
+    check('WB 当日继续叠加', third.daily[t.wbKey('cn', 'a1')], 100)
+
+    // 两个区域同名 id 不串账。
+    const other = t.commitWorkBuddy([{ key: t.wbKey('global', 'a1'), total: 500 }])
+    check('WB 区域前缀隔离', other.cumulative[t.wbKey('global', 'a1')], undefined)
+    check('WB 国内版不受影响', other.cumulative[t.wbKey('cn', 'a1')], 100)
+    checkTrue('WB 键带区域', t.wbKey('cn', 'x') !== t.wbKey('global', 'x'))
+    void dir
+  }
+
+  // ── 12. WB 基准过旧：累计照记，当日不记 ────────────────────────────────
+  {
+    const dir = freshDir()
+    const key = t.wbKey('cn', 'b1')
+    fs.writeFileSync(path.join(dir, 'wb-last.json'),
+      JSON.stringify({ at: Date.now() - 3 * 60 * 60 * 1000, date: t.todayKey(), totals: { [key]: 2000 } }), 'utf8')
+    const out = t.commitWorkBuddy([{ key, total: 1500 }])
+    check('WB 过旧仍累计', out.cumulative[key], 500)
+    check('WB 过旧不计当日', out.daily[key], undefined)
+  }
+
+  // ── 13. WB 跨天：累计照记，当日不记 ────────────────────────────────────
+  {
+    const dir = freshDir()
+    const key = t.wbKey('cn', 'c1')
+    fs.writeFileSync(path.join(dir, 'wb-last.json'),
+      JSON.stringify({ at: Date.now(), date: '2000-01-01', totals: { [key]: 800 } }), 'utf8')
+    const out = t.commitWorkBuddy([{ key, total: 700 }])
+    check('WB 跨天仍累计', out.cumulative[key], 100)
+    check('WB 跨天不计当日', out.daily[key], undefined)
+  }
+
+  // ── 14. WB 余额上升与失败都不记 ────────────────────────────────────────
+  {
+    const dir = freshDir()
+    const key = t.wbKey('cn', 'd1')
+    fs.writeFileSync(path.join(dir, 'wb-last.json'),
+      JSON.stringify({ at: Date.now(), date: t.todayKey(), totals: { [key]: 100 } }), 'utf8')
+    const up = t.commitWorkBuddy([{ key, total: 400 }])
+    check('WB 签到回升不记消耗', up.deltas[key], 0)
+    check('WB 回升不改累计', up.cumulative[key], undefined)
+
+    const fail = t.commitWorkBuddy([{ key, total: null }])
+    check('WB 失败不记消耗', fail.deltas[key], 0)
+    checkTrue('WB 失败基准保留 400', (() => {
+      const last = JSON.parse(fs.readFileSync(path.join(dir, 'wb-last.json'), 'utf8'))
+      return last.totals[key] === 400
+    })())
+  }
+
+  // ── 15. WB 读账本快照 ──────────────────────────────────────────────────
+  {
+    const dir = freshDir()
+    const key = t.wbKey('cn', 'e1')
+    fs.writeFileSync(path.join(dir, 'wb-last.json'),
+      JSON.stringify({ at: Date.now(), date: t.todayKey(), totals: { [key]: 900 } }), 'utf8')
+    t.commitWorkBuddy([{ key, total: 600 }])
+    const snapshot = t.readWorkBuddyLedger()
+    check('WB 快照带今日', snapshot.daily[key], 300)
+    check('WB 快照带累计', snapshot.cumulative[key], 300)
+    checkTrue('WB 快照带时间', typeof snapshot.at === 'string')
+  }
+
+  // ── 16. 写盘节流：读数与基准一致时不重写文件 ───────────────────────────
+  {
+    const dir = freshDir()
+    seedLast(dir, { qoder: 500 })
+    const before = JSON.parse(fs.readFileSync(path.join(dir, 'last.json'), 'utf8')).at
+    t.commitReadings([{ provider: 'qoder', total: 500 }])
+    const after = JSON.parse(fs.readFileSync(path.join(dir, 'last.json'), 'utf8')).at
+    check('读数未变时不重写基准', after, before)
+    checkTrue('读数未变时不生成当日文件', !fs.readdirSync(dir).some(name => name.startsWith('daily-')))
+
+    // 读数一变就必须落盘。
+    t.commitReadings([{ provider: 'qoder', total: 480 }])
+    check('读数变化后落盘', JSON.parse(fs.readFileSync(path.join(dir, 'last.json'), 'utf8')).totals.qoder, 480)
+  }
+
   if (failures.length > 0) {
     console.error(`✗ ${failures.length}/${checks} 项失败`)
     for (const line of failures) console.error('  - ' + line)

@@ -541,10 +541,71 @@ check('normalizeTotals 保留两位', t.normalizeTotals({ a: 1.23456 }), { a: 1.
     { left: 900, top: 100, width: 340, height: 320, relRight: 40, vertical: false })
 }
 
+// ── 12. 并发上限 ──────────────────────────────────────────────────────────
+// 十家一起打上游容易同时抖动；mapLimit 保证同时最多 N 个，且结果保序。
+async function testMapLimit() {
+  let running = 0
+  let peak = 0
+  const seen = []
+  const out = await t.mapLimit([1, 2, 3, 4, 5, 6, 7], 3, async value => {
+    running += 1
+    peak = Math.max(peak, running)
+    seen.push(value)
+    await new Promise(resolve => setTimeout(resolve, 1))
+    running -= 1
+    return value * 10
+  })
+  check('mapLimit 结果保序', out, [10, 20, 30, 40, 50, 60, 70])
+  check('mapLimit 同时最多 3 个', peak, 3)
+  check('mapLimit 全部执行', seen.length, 7)
+
+  // 空数组不该卡住（worker 数为 0）。
+  check('mapLimit 空数组', await t.mapLimit([], 3, async v => v), [])
+  // limit 超过总数时按总数开。
+  check('mapLimit limit 大于长度', await t.mapLimit([1, 2], 9, async v => v + 1), [2, 3])
+}
+
+// ── 13. 隐藏渠道降频 ──────────────────────────────────────────────────────
+// 可见渠道每轮都查；隐藏渠道降到 5 分钟一次，但从未查过的仍然要查。
+check('可见渠道每轮都查', t.shouldPollChannel(false, 0, 1000), true)
+check('隐藏渠道未到间隔时跳过', t.shouldPollChannel(true, 1000, 1000 + 60_000), false)
+check('隐藏渠道到间隔后重查', t.shouldPollChannel(true, 1000, 1000 + t.HIDDEN_POLL_MS), true)
+check('从未查过的隐藏渠道仍要查', t.shouldPollChannel(true, undefined, 1000), true)
+
+// ── 14. 失败行时效 ────────────────────────────────────────────────────────
+// 半小时内沿用旧读数；超过就改成没有数据，免得展示过期余额。
+{
+  const at = 10_000_000
+  const fresh = t.failureRow({ total: 800, accounts: 2, unit: 'credits', packages: [], lastOkAt: at - 60_000 }, at)
+  check('失败 1 分钟内沿用余额', fresh.total, 800)
+  check('失败 1 分钟内不算过期', fresh.stale, false)
+  check('失败保留账号数', fresh.accounts, 2)
+
+  const stale = t.failureRow({ total: 800, accounts: 2, unit: 'credits', packages: [], lastOkAt: at - t.STALE_ROW_MS - 1 }, at)
+  check('超过 30 分钟改显没有数据', stale.total, null)
+  check('超时标记为过期', stale.stale, true)
+
+  // 从未成功过：直接没有数据。
+  check('从未成功过时不显示数字', t.failureRow(undefined, at).total, null)
+  // 没有成功时间戳的旧行（升级前的行）同样按没有数据处理。
+  check('缺时间戳按没有数据处理', t.failureRow({ total: 800 }, at).total, null)
+}
+
+// ── 15. WorkBuddy 汇总与账本键 ────────────────────────────────────────────
+check('sumSpend 求和并保留两位', t.sumSpend([1.234, 2]), 3.23)
+check('sumSpend 全是 null 时为 null', t.sumSpend([null, undefined]), null)
+check('sumSpend 空数组为 null', t.sumSpend([]), null)
+check('sumSpend 有 0 时算有值', t.sumSpend([0, null]), 0)
+check('wbLedgerKey 带区域', t.wbLedgerKey('cn', 'a1'), 'wb:cn:a1')
+check('wbLedgerKey 两区域不同键', t.wbLedgerKey('cn', 'a1') !== t.wbLedgerKey('global', 'a1'), true)
+check('normalizeWorkBuddy 过滤脏值', t.normalizeWorkBuddy({ daily: { a: 1, b: 'x' }, cumulative: null }),
+  { daily: { a: 1 }, cumulative: {} })
+
 // ── 收口 ──────────────────────────────────────────────────────────────────
 testReadChannel()
   .then(testReadChannelDetail)
   .then(testTooltip)
+  .then(testMapLimit)
   .then(() => {
   if (failures.length > 0) {
     console.error(`✗ ${failures.length}/${checks} 项失败`)

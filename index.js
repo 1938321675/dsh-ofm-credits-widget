@@ -43,6 +43,25 @@ const API_PREFIX = '/api/ofm-credit-watch'
 /** 基准超过这么久就不再把差值记到当日：归属已不可判断。 */
 const STALE_MS = 2 * 60 * 60 * 1000
 
+/**
+ * 保底落盘间隔。
+ *
+ * 读数与上一轮完全一致时不写盘（见 {@link commitReadings}），可基准时间也会
+ * 跟着停住。若一直不动，超过 {@link STALE_MS} 之后每一轮都会被误判成「基准
+ * 过旧」而停止记账。所以最迟这么久强制写一次，让基准时间跟着走。
+ */
+const RESAVE_MS = 10 * 60 * 1000
+
+/**
+ * WorkBuddy 账号账本的门槛。
+ *
+ * 与 OFM 渠道的区别在于：这里要记两份。**累计**是自本功能启用起的净下降，
+ * 跨天、停机之后的那段同样成立，因此不看陈旧与日期；**当日**仍然只在
+ * 「间隔不超过两小时且同一天」时才记，晚一天的账不能记到今天头上。
+ */
+const WB_STALE_MS = 2 * 60 * 60 * 1000
+const WB_RESAVE_MS = 10 * 60 * 1000
+
 /** 请求体上限：一轮也就十个渠道，64KB 绰绰有余。 */
 const BODY_LIMIT = 64 * 1024
 
@@ -152,20 +171,25 @@ function commitReadings(readings) {
   const date = todayKey()
   const daily = loadDaily(date)
   const last = normalizeLast(readJson(lastFile(), null))
+  const sinceWrite = last.at === 0 ? Number.POSITIVE_INFINITY : at - last.at
   // 基准太旧或跨了一天：差值归属不了，本轮只更新基准。
   //
   // 跨天这一条不能漏：23:59 采到 1000、00:01 采到 900，那 100 是昨天花的，
   // 记到今天就是凭空多报。基准里带着它自己的日期，正是为了这个判断。
-  const tooOld = last.at === 0 || at - last.at > STALE_MS || last.date !== date
+  const tooOld = last.at === 0 || sinceWrite > STALE_MS || last.date !== date
 
   const deltas = {}
+  let changed = false
   for (const row of readings) {
     if (!row || typeof row.provider !== 'string') continue
     const provider = row.provider
     const total = Number.isFinite(row.total) ? row.total : null
     const previous = Number.isFinite(last.totals[provider]) ? last.totals[provider] : null
 
-    if (total !== null) last.totals[provider] = total
+    if (total !== null) {
+      if (total !== previous) changed = true
+      last.totals[provider] = total
+    }
 
     if (total === null || previous === null || tooOld) {
       deltas[provider] = 0
@@ -185,10 +209,132 @@ function commitReadings(readings) {
 
   last.at = at
   last.date = date
-  writeJson(dailyFile(date), daily)
-  writeJson(lastFile(), last)
+
+  // 写盘节流：读数与上一轮一模一样时，两个文件写下去的都是旧内容，
+  // 纯属每分钟一次的 IO。此时跳过写，基准值仍然正确——下一轮拿到的
+  // 磁盘基准与真实读数一致，差值照旧为 0。保底见 {@link RESAVE_MS}。
+  if (changed || tooOld || sinceWrite >= RESAVE_MS) {
+    writeJson(dailyFile(date), daily)
+    writeJson(lastFile(), last)
+  }
 
   return { date, totals: daily.totals, deltas }
+}
+
+// ── WorkBuddy 账号账本 ──────────────────────────────────────────────────────
+
+/**
+ * WorkBuddy 账号的键。
+ *
+ * 带区域前缀：国内版与国际版是两条独立的上游，理论上可能出现同一个
+ * accountId，不带区域就会把两边的消耗加到一个桶里。
+ */
+function wbKey(region, accountId) {
+  return `wb:${region}:${accountId}`
+}
+
+function wbLastFile() {
+  return path.join(ledgerDir(), 'wb-last.json')
+}
+
+function wbTotalFile() {
+  return path.join(ledgerDir(), 'wb-total.json')
+}
+
+function wbDailyFile(date) {
+  return path.join(ledgerDir(), `wb-daily-${date}.json`)
+}
+
+/** 读任意 `{ totals: { key: number } }` 形状的文件，坏数据一律当空。 */
+function loadTotals(file) {
+  const raw = readJson(file, null)
+  const totals = {}
+  if (raw && typeof raw.totals === 'object' && raw.totals !== null) {
+    for (const [key, value] of Object.entries(raw.totals)) {
+      if (Number.isFinite(value)) totals[key] = value
+    }
+  }
+  return totals
+}
+
+/**
+ * WorkBuddy 账本快照。
+ *
+ * `daily` 是今日消耗，`cumulative` 是自本功能启用起的累计消耗——
+ * 两者分开存，因为口径不同：累计不跨天清零，也不受「基准过旧」影响，
+ * 它记的就是「余额净下降了多少」。
+ */
+function readWorkBuddyLedger() {
+  const date = todayKey()
+  const last = normalizeLast(readJson(wbLastFile(), null))
+  return {
+    date,
+    daily: loadTotals(wbDailyFile(date)),
+    cumulative: loadTotals(wbTotalFile()),
+    at: last.at > 0 ? new Date(last.at).toISOString() : null,
+  }
+}
+
+/**
+ * 用一轮 WorkBuddy 读数更新账本。
+ *
+ * `readings` 是 `[{ key, total }]`，`total` 非数表示该账号本轮读不到——
+ * 此时不动基准也不记账，否则一次上游抖动会被当成「余额归零」。
+ */
+function commitWorkBuddy(readings) {
+  const at = Date.now()
+  const date = todayKey()
+  const last = normalizeLast(readJson(wbLastFile(), null))
+  const sinceWrite = last.at === 0 ? Number.POSITIVE_INFINITY : at - last.at
+  const daily = loadTotals(wbDailyFile(date))
+  const cumulative = loadTotals(wbTotalFile())
+
+  // 当日口径：跨天或间隔太久就不记（那笔账归属不明），只推进基准。
+  const staleForDaily = last.at === 0 || sinceWrite > WB_STALE_MS || last.date !== date
+  // 累计口径只看差值本身：停机期间余额照样会掉，那同样是消耗。
+  const hasBaseline = last.at !== 0
+
+  const deltas = {}
+  let changed = false
+  for (const row of readings) {
+    if (!row || typeof row.key !== 'string' || row.key === '') continue
+    const key = row.key
+    const total = Number.isFinite(row.total) ? row.total : null
+    const previous = Number.isFinite(last.totals[key]) ? last.totals[key] : null
+
+    if (total !== null) {
+      if (total !== previous) changed = true
+      last.totals[key] = total
+    }
+
+    if (total === null || previous === null) {
+      deltas[key] = 0
+      continue
+    }
+
+    // 只有余额下降才算消耗：签到、领积分、换包都会让余额上升。
+    const delta = previous - total
+    if (delta <= 0) {
+      deltas[key] = 0
+      continue
+    }
+    deltas[key] = round2(delta)
+    cumulative[key] = round2((cumulative[key] || 0) + delta)
+    if (hasBaseline && !staleForDaily) {
+      daily[key] = round2((daily[key] || 0) + delta)
+    }
+  }
+
+  last.at = at
+  last.date = date
+
+  if (changed || staleForDaily || sinceWrite >= WB_RESAVE_MS) {
+    writeJson(wbDailyFile(date), { date, totals: daily })
+    writeJson(wbTotalFile(), { totals: cumulative })
+    writeJson(wbLastFile(), last)
+  }
+
+  return { date, daily, cumulative, deltas }
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
@@ -254,6 +400,15 @@ async function handleApi(req, res) {
       }
       return sendJson(res, 405, { error: 'method not allowed' })
     }
+    if (route === '/wb') {
+      if (req.method === 'GET') return sendJson(res, 200, readWorkBuddyLedger())
+      if (req.method === 'POST') {
+        const body = await readBody(req)
+        const readings = Array.isArray(body?.readings) ? body.readings : []
+        return sendJson(res, 200, commitWorkBuddy(readings))
+      }
+      return sendJson(res, 405, { error: 'method not allowed' })
+    }
     if (route === '/ping') return sendJson(res, 200, { ok: true })
     return sendJson(res, 404, { error: 'not found' })
   } catch (error) {
@@ -281,4 +436,7 @@ export function apply(ctx) {
 }
 
 /** 供离线测试直接驱动账本逻辑，不经过 HTTP。 */
-export const __test = { commitReadings, readLedger, normalizeLast, todayKey, round2, ledgerDir }
+export const __test = {
+  commitReadings, readLedger, normalizeLast, todayKey, round2, ledgerDir,
+  wbKey, readWorkBuddyLedger, commitWorkBuddy, WB_STALE_MS, WB_RESAVE_MS, RESAVE_MS, STALE_MS,
+}
