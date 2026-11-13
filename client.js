@@ -893,6 +893,9 @@ window.__ModuleLoader__.load({
       const [wbOpen, setWbOpen] = useState(() => {
         try { return window.localStorage?.getItem(WB_OPEN_KEY) === '1' } catch { return false }
       })
+      // WorkBuddy 自己的刷新态：与渠道的 loading 分开，两者互不等待，
+      // 标题栏的转圈图标把两个合成一个显示。
+      const [wbLoading, setWbLoading] = useState(false)
 
       // 上一轮读数与串行保护：轮询和手动刷新可能重叠，只允许最新一轮落库。
       const previous = useRef(null)
@@ -1111,10 +1114,12 @@ window.__ModuleLoader__.load({
       const pollWorkBuddy = useCallback(async () => {
         const seq = wbGeneration.current + 1
         wbGeneration.current = seq
+        setWbLoading(true)
         const regions = await Promise.all(WB_REGIONS.map(async region => {
           try { return await fetchWorkBuddyRegion(region) } catch { return null }
         }))
         if (!alive.current || seq !== wbGeneration.current) return
+        setWbLoading(false)
         // 两个区域都取不到才叫"没连上"：只有一个区域有账号时另一个本就返回空。
         const connected = regions.some(list => list !== null)
         const rows = connected ? regions.flatMap(list => list ?? []) : []
@@ -1314,6 +1319,9 @@ window.__ModuleLoader__.load({
       const channelCount = visibleRows.filter(row => Number.isFinite(row.total)).length
       const failedCount = visibleRows.filter(row => row.ok === false).length
       const hiddenCount = rows.length - visibleRows.length
+
+      // 标题栏的转圈：两套上游任一在刷新就转，用户按一次钮能看到它确实动了。
+      const busy = loading || wbLoading
 
       const headerWhen = updatedAt === 0 ? t('never')
         : (() => {
@@ -1559,10 +1567,17 @@ window.__ModuleLoader__.load({
             h('span', { style: style.title }, t('title')),
             h('span', { style: style.sub }, headerWhen)),
           h('button', {
-            type: 'button', style: style.iconBtn, title: loading ? t('refreshing') : t('refresh'),
+            type: 'button', style: style.iconBtn,
+            title: busy ? t('refreshing') : t('refresh'),
             onPointerDown: event => event.stopPropagation(),
-            onClick: event => { event.stopPropagation(); void poll() },
-          }, loading ? '◌' : '⟳'),
+            // 一次刷新把两套上游都走一遍：渠道是每分钟自转的，WorkBuddy 是
+            // 五分钟一轮，手动刷新不该只叫醒其中一个。
+            onClick: event => {
+              event.stopPropagation()
+              void poll()
+              void pollWorkBuddy()
+            },
+          }, busy ? '◌' : '⟳'),
           // 勾选配置：就地展开面板，不弹窗（悬浮层里再套弹窗会被遮住，
           // 也会跟宿主自己的弹层层级打架）。
           h('button', {
@@ -1649,7 +1664,10 @@ window.__ModuleLoader__.load({
             }))),
         // WorkBuddy 分区放在渠道列表之后：它是另一套上游，视觉上与上面隔开，
         // 但共用同一个滚动区，不额外占用卡片高度。
-        wbSection,
+        //
+        // 设置面板展开时让位：勾选表是"就地展开"的操作区，它上面不该再压
+        // 一段与勾选无关的内容，否则设置一打开就得先往下滚。
+        configOpen ? null : wbSection,
         // 配置面板：与列表同宽就地展开，列出全部渠道（含已隐藏的），
         // 每行显示当前余额，方便判断"这个穷光蛋渠道可以藏起来"。
         collapsed || !configOpen ? null : h('div', { style: style.configPane, 'data-ofm-credit-watch-config': 'pane' },

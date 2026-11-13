@@ -240,6 +240,15 @@ check('收起时不显示配置面板',
   })
   check('读不到积分时账号行照常列出', countWbRows(empty), 3)
 
+  // 设置面板是就地展开的操作区，展开时 WorkBuddy 分区让位，
+  // 免得上方的消耗块把勾选表挤到滚动区之外。
+  const withSettings = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.wbRows]: wbRows(), [IDX.wbOpen]: true, [IDX.configOpen]: true,
+  })
+  check('设置面板展开时 WorkBuddy 分区让位', wbSectionOf(withSettings), undefined)
+  check('设置面板展开时渠道行照常渲染', countRows(withSettings), 10)
+
   // 隐藏 OFM 渠道不影响 WorkBuddy 分区——两套上游互不牵连。
   const allHiddenOfm = render({
     [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(allIds),
