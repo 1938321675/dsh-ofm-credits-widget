@@ -644,7 +644,18 @@ check('clampStatsSplit NaN 返回 null', t.clampStatsSplit(NaN, 400), null)
 
   global.window.localStorage.setItem(t.STATS_SPLIT_KEY, '5')
   check('小于下限的存量值回落成 null', t.loadStatsSplit(), null)
+
+  // 存量值可能来自更大的窗口或旧版本的异常值：读的时候要按当前视口夹一次，
+  // 否则列表会高过整张卡片，下半区被挤到看不见——表现为「分区消失了」。
+  global.window.localStorage.setItem(t.STATS_SPLIT_KEY, '100000')
+  check('超大存量值按视口夹回', t.loadStatsSplit(), Math.round(800 * 0.6))
+  check('主界面分隔同样夹取', (() => {
+    global.window.localStorage.setItem(t.MAIN_SPLIT_KEY, '100000')
+    return t.loadMainSplit()
+  })(), Math.round(800 * 0.6))
+
   global.window.localStorage._data.delete(t.STATS_SPLIT_KEY)
+  global.window.localStorage._data.delete(t.MAIN_SPLIT_KEY)
 }
 
 // ── 收口 ──────────────────────────────────────────────────────────────────

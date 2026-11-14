@@ -335,6 +335,9 @@ check('收起时不显示配置面板',
 
   // 统计视图下不该再出现渠道列表行——它是整块替换。
   check('统计视图不渲染渠道列表', countRows(stats), 0)
+  // 页脚是「几个渠道有余额 / 隐藏了几个」的列表汇总，统计页里不对题。
+  check('统计视图不渲染页脚', allText(stats).join(' ').includes('个渠道有余额'), false)
+  check('列表视图有页脚', allText(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })).join(' ').includes('个渠道有余额'), true)
   // WorkBuddy 分区与设置面板同理：它们挂在 body 的其它位置，
   // 只换列表会让统计页看起来只铺了上半部分。
   check('统计视图不渲染 WorkBuddy 分区', wbSectionOf(stats) === undefined, true)
@@ -383,7 +386,8 @@ check('收起时不显示配置面板',
     && n.props.style !== undefined && n.props.style.padding === '4px 0 6px')
   check('没拖过时 body 限制高度', bodyOf(list)?.props.style?.maxHeight, 320)
   check('拖过之后 body 放开高度限制', bodyOf(sized)?.props.style?.maxHeight, undefined)
-  check('拖过之后 body 不做自身滚动', bodyOf(sized)?.props.style?.overflowY, 'visible')
+  // 保留自身滚动：卡片可能是固定高度的，改成 visible 会让下半区溢出卡片被裁掉。
+  check('拖过之后 body 仍自己滚动', bodyOf(sized)?.props.style?.overflowY, 'auto')
   void panelOf
 
   // 统计视图与设置面板里，上半区不是列表，分隔条不出现。

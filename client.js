@@ -557,11 +557,7 @@ window.__ModuleLoader__.load({
      * 让内容决定，拖过之后才固定下来。
      */
     function loadStatsSplit() {
-      try {
-        const raw = Number(window.localStorage?.getItem(STATS_SPLIT_KEY))
-        if (Number.isFinite(raw) && raw >= STATS_SPLIT_MIN) return Math.round(raw)
-      } catch { /* 存储不可用 */ }
-      return null
+      return readSplit(STATS_SPLIT_KEY)
     }
 
     function saveStatsSplit(height) {
@@ -570,11 +566,23 @@ window.__ModuleLoader__.load({
 
     /** 主界面上下两块的分隔高度；语义与卡片尺寸一致，null 表示随内容。 */
     function loadMainSplit() {
+      return readSplit(MAIN_SPLIT_KEY)
+    }
+
+    /**
+     * 读一个分隔高度。
+     *
+     * 读到之后按当前视口夹一次：存值可能来自更大的窗口，也可能是旧版本留下的
+     * 异常值。不夹的话列表会高过整张卡片，下半区被挤到看不见的地方——
+     * 看起来就像「WorkBuddy 分区消失了」。
+     */
+    function readSplit(key) {
       try {
-        const raw = Number(window.localStorage?.getItem(MAIN_SPLIT_KEY))
-        if (Number.isFinite(raw) && raw >= STATS_SPLIT_MIN) return Math.round(raw)
-      } catch { /* 存储不可用 */ }
-      return null
+        const raw = Number(window.localStorage?.getItem(key))
+        if (!Number.isFinite(raw) || raw < STATS_SPLIT_MIN) return null
+        const vh = typeof window.innerHeight === 'number' ? window.innerHeight : 800
+        return clampStatsSplit(raw, vh * 0.6)
+      } catch { return null }
     }
 
     function saveMainSplit(height) {
@@ -1629,14 +1637,17 @@ window.__ModuleLoader__.load({
         },
         // 高度自适应时列表最多 320 高；用户拉过右下角之后改成吃满剩余空间。
         //
-        // 拖过分隔条之后这两种都放开：列表高度由用户指定，再套一层
-        // maxHeight + 滚动就变成「列表没变高、只是里面滚了」，拖动看起来没反应。
-        // 此时让 body 随内容长高，卡片本身是 height:auto，会跟着变。
-        body: mainSplit !== null
-          ? { overflowY: 'visible', padding: '4px 0 6px' }
-          : size.height === null || collapsed
+        // 拖过分隔条之后去掉 320 上限：列表高度由用户指定，再压一个 maxHeight
+        // 就变成「列表没变高、只是里面滚了」，拖动看起来没反应。
+        //
+        // 但**不能**改成 overflowY: visible——卡片拉过右下角时 panel 是固定高度
+        // 且 overflow: hidden，visible 会让下半区溢出到卡片外被裁掉，表现就是
+        // WorkBuddy 分区整个消失。始终保留自身滚动，两种情况都能看到全部内容。
+        body: size.height === null || collapsed
+          ? (mainSplit === null
             ? { maxHeight: 320, overflowY: 'auto', padding: '4px 0 6px' }
-            : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0 6px' },
+            : { overflowY: 'auto', padding: '4px 0 6px' })
+          : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0 6px' },
         // 主界面渠道列表：没拖过横条时随内容长；拖过之后固定高度并自己滚动。
         mainListAuto: { overflowY: 'auto' },
         // 固定高度时靠自身滚动；flexShrink 0 防止被下面的分区挤压。
@@ -2179,7 +2190,9 @@ window.__ModuleLoader__.load({
               type: 'button', style: { ...style.pill, marginLeft: 'auto' },
               onClick: () => setConfigOpen(false),
             }, t('settingsDone')))),
-        collapsed ? null : h('div', { style: style.footer },
+        // 统计视图不显示页脚：它是「几个渠道有余额 / 隐藏了几个」的列表汇总，
+        // 放在用量统计页里既不对题，也挤掉了本就不宽的高度。
+        collapsed || view === 'stats' ? null : h('div', { style: style.footer },
           h('span', null, rows.length === 0
             ? t('never')
             : total === null ? t('never') : fill(t('summary'), { channels: channelCount, total: kilo(total) })),
