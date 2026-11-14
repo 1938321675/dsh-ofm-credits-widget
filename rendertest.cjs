@@ -379,22 +379,26 @@ check('收起时不显示配置面板',
   check('没拖过时渠道列表没有固定高度', mainListOf(list)?.props.style?.height, undefined)
 
   const sized = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.mainSplit]: 180 })
-  // 存的是「最大高度」而不是固定高度：渠道只有 4 个时列表按内容撑开，
-  // 下方紧跟 WorkBuddy 分区，不会在中间留出一大片空白。
-  check('拖过之后渠道列表带最大高度', mainListOf(sized)?.props.style?.maxHeight, 180)
-  check('拖过之后渠道列表不固定高度', mainListOf(sized)?.props.style?.height, undefined)
-  check('拖过之后渠道列表超出时自己滚', mainListOf(sized)?.props.style?.overflowY, 'auto')
+  // 拖过之后按固定高度参与上下分配：拖动就是在改这块的高度。
+  check('拖过之后渠道列表带固定高度', mainListOf(sized)?.props.style?.height, 180)
+  // 不被压扁：往上拖时浏览器不得把行挤扁（否则横线不动、内容反而变细）。
+  check('渠道列表不参与压缩', mainListOf(sized)?.props.style?.flexShrink, 0)
+  // 下限不靠样式（overflow:auto 的 min-content 算出来是 0），
+  // 而是拖动时用实测 scrollHeight 夹取，见下方拖动链路用例。
+  check('渠道列表超出时自己滚', mainListOf(sized)?.props.style?.overflowY, 'auto')
 
-  // body 在拖过分隔条后去掉 320 上限，改为逐块滚动；不再做上下 flex 分配。
+  // body 在拖过之后变成纵向 flex：上下两块在里面真正分配高度。
   const bodyOf = tree => flatten(tree).find(n => n.props !== undefined
     && n.props.style !== undefined && n.props.style.padding === '4px 0 6px')
   check('没拖过时 body 限制高度', bodyOf(list)?.props.style?.maxHeight, 320)
   check('拖过之后 body 放开高度限制', bodyOf(sized)?.props.style?.maxHeight, undefined)
-  check('拖过之后 body 不是 flex 分配容器', bodyOf(sized)?.props.style?.display, undefined)
+  check('拖过之后 body 是纵向 flex', bodyOf(sized)?.props.style?.display, 'flex')
+  check('拖过之后 body 纵向排列', bodyOf(sized)?.props.style?.flexDirection, 'column')
 
-  // 下半区随内容，不抢剩余空间。
+  // 下半区吃剩余高度，横线才会跟着手走。
   const wbOf = tree => flatten(tree).find(n => n.props !== undefined && n.props['data-ofm-credit-watch-wb'] === 'section')
-  check('拖过之后 WorkBuddy 分区仍随内容', wbOf(sized)?.props.style?.flex, undefined)
+  check('拖过之后 WorkBuddy 分区吃剩余高度', wbOf(sized)?.props.style?.flex, '1 1 auto')
+  check('没拖过时 WorkBuddy 分区随内容', wbOf(list)?.props.style?.flex, undefined)
 
   // 统计视图与设置面板里，上半区不是列表，分隔条不出现。
   check('统计视图没有主界面分隔条',
@@ -417,7 +421,7 @@ check('收起时不显示配置面板',
   check('分隔条带按下处理', typeof splitter?.props.onPointerDown, 'function')
 
   // 造一个够用的 DOM 桩：分隔条的父节点能查到列表，列表有高度。
-  const fakeList = { offsetHeight: 120, parentElement: { clientHeight: 400, offsetHeight: 400 } }
+  const fakeList = { offsetHeight: 120, scrollHeight: 90, parentElement: { clientHeight: 400, offsetHeight: 400 } }
   const fakeParent = { querySelector: () => fakeList }
   const fakeEvent = {
     button: 0, clientY: 100,
@@ -437,25 +441,30 @@ check('收起时不显示配置面板',
   handlers.pointermove({ clientY: 99999, preventDefault() {} })
   check('拖动高度被夹进可视区', hooks[IDX.mainSplit], 400 - t.STATS_SPLIT_MIN)
 
-  // 双向都要跟手：同一轮拖动里往回拖，高度必须立刻变小。
-  // 基准是按下那一刻的静态值，所以任何位置都能落在 (startHeight + 位移) 上，
-  // 不会出现「只能变大、拖不回去」。
-  handlers.pointermove({ clientY: 60, preventDefault() {} })
-  check('往回拖会变小', hooks[IDX.mainSplit], 120 + (60 - 100))
+  // 双向都要跟手。基准是按下那一刻的静态值，任何位置都能落在
+  // (startHeight + 位移) 上，不会出现「只能变大、拖不回去」。
+  handlers.pointermove({ clientY: 90, preventDefault() {} })
+  check('往回拖会变小', hooks[IDX.mainSplit], 120 + (90 - 100))
   handlers.pointermove({ clientY: 140, preventDefault() {} })
   check('再往回拖又变大', hooks[IDX.mainSplit], 120 + (140 - 100))
 
-  // 上下两端都夹住：拉到顶不超过可用高度减一个最小块，拉到底停在最小高度。
+  // 拖到比内容还矮时被下限兜住（内容 90px），不会把行压扁。
+  handlers.pointermove({ clientY: 60, preventDefault() {} })
+  check('低于内容高度时被兜住', hooks[IDX.mainSplit], 90)
+
+  // 上下两端都夹住：拉到顶不超过可用高度减一个最小块；
+  // 拉到底停在下限——下限是内容自然高度（scrollHeight=90），
+  // 不是固定 48：钉在 48 会把行压扁，而横线却不动。
   handlers.pointermove({ clientY: 90000, preventDefault() {} })
   check('拉到顶停在上限', hooks[IDX.mainSplit], 400 - t.STATS_SPLIT_MIN)
   handlers.pointermove({ clientY: -90000, preventDefault() {} })
-  check('拉到底停在最小高度', hooks[IDX.mainSplit], t.STATS_SPLIT_MIN)
+  check('拉到底停在内容高度', hooks[IDX.mainSplit], 90)
 
   // 松手：监听器要摘掉，且高度落盘。
   handlers.pointerup({})
   check('松手后摘掉 pointermove', handlers.pointermove, undefined)
   check('松手后摘掉 pointerup', handlers.pointerup, undefined)
-  check('松手后高度已落盘', global.window.localStorage.getItem(t.MAIN_SPLIT_KEY), String(t.STATS_SPLIT_MIN))
+  check('松手后高度已落盘', global.window.localStorage.getItem(t.MAIN_SPLIT_KEY), '90')
 
   global.window.localStorage.setItem(t.MAIN_SPLIT_KEY, '')
 }
