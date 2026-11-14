@@ -147,7 +147,9 @@ const IDX = {
   error: 6, now: 7, pos: 8, collapsed: 9, hidden: 10, hiddenIds: 11, configOpen: 12,
   today: 13, size: 14,
   // WorkBuddy 分区：接在 size 之后，前十五个下标不受影响。
-  wbRows: 15, wbLedger: 16, wbConnected: 17, wbOpen: 18,
+  wbRows: 15, wbLedger: 16, wbConnected: 17, wbOpen: 18, wbLoading: 19,
+  // 视图与 token 用量：接在 WorkBuddy 之后。
+  view: 20, usage: 21, usageDate: 22,
 }
 
 /** WorkBuddy 分区节点。 */
@@ -236,7 +238,7 @@ check('收起时不显示配置面板',
   // 三列数字长得一样（都是 −数字），没有列头就得靠猜。
   const head = flatten(expanded).find(node => node.props !== undefined && node.props['data-wb-colhead'] === 'true')
   check('展开后有列头', head !== undefined, true)
-  check('列头四格', head.children.length, 4)
+  check('列头三格（累计已移到统计界面）', head.children.length, 3)
 
   // 记过账的账号显示 −0，没记过的显示 ·：两者含义不同。
   const zero = render({
@@ -275,6 +277,47 @@ check('收起时不显示配置面板',
     [IDX.wbRows]: wbRows(), [IDX.wbOpen]: true,
   })
   check('OFM 渠道全隐藏时 WorkingBuddy 行仍在', countWbRows(allHiddenOfm), 3)
+}
+
+// ── 4c. 统计界面 ──────────────────────────────────────────────────────────
+{
+  const sampleUsage = {
+    available: true,
+    days: [
+      { date: '2026-11-10', ofm: { input: 100, output: 50, cacheRead: 1000, calls: 2 }, workbuddy: { input: 200, output: 80, cacheRead: 2000, calls: 3 }, byChannel: { qoder: { input: 100, output: 50, cacheRead: 1000, calls: 2 } } },
+      { date: '2026-11-11', ofm: { input: 300, output: 90, cacheRead: 3000, calls: 4 }, workbuddy: { input: 400, output: 60, cacheRead: 4000, calls: 5 }, byChannel: { trae: { input: 300, output: 90, cacheRead: 3000, calls: 4 } } },
+    ],
+  }
+  const statsOf = tree => flatten(tree).find(node => node.props !== undefined && node.props['data-ofm-credit-watch-stats'] !== undefined)
+
+  check('列表视图没有统计块', statsOf(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })), undefined)
+
+  const stats = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats', [IDX.usage]: sampleUsage })
+  check('统计视图渲染出统计块', statsOf(stats)?.props['data-ofm-credit-watch-stats'], 'section')
+  // 统计视图下不该再出现渠道列表行——它是整块替换。
+  check('统计视图不渲染渠道列表', countRows(stats), 0)
+
+  // 默认跟最新一天走：11-11 的渠道是 trae。
+  const channelIds = flatten(stats).filter(n => n.props !== undefined && n.props['data-stats-channel'] !== undefined)
+    .map(n => n.props['data-stats-channel'])
+  check('默认显示最新一天的渠道', channelIds, ['trae'])
+
+  // 指定日期后切到那天（11-10 的渠道是 qoder）。
+  const picked = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.view]: 'stats', [IDX.usage]: sampleUsage, [IDX.usageDate]: '2026-11-10',
+  })
+  const pickedIds = flatten(picked).filter(n => n.props !== undefined && n.props['data-stats-channel'] !== undefined)
+    .map(n => n.props['data-stats-channel'])
+  check('指定日期显示那天的渠道', pickedIds, ['qoder'])
+
+  // cost-meter 不可用：给一句说明，不显示数字。
+  const offline = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats', [IDX.usage]: { available: false, days: [] } })
+  check('cost-meter 不可用时标记出来', statsOf(offline)?.props['data-ofm-credit-watch-stats'], 'unavailable')
+
+  // 空账本：同样是空状态。
+  const emptyStats = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats', [IDX.usage]: { available: true, days: [] } })
+  check('没有数据时显示空状态', statsOf(emptyStats)?.props['data-ofm-credit-watch-stats'], 'empty')
 }
 
 // ── 5. 隐藏后合计与列表一致 ───────────────────────────────────────────────

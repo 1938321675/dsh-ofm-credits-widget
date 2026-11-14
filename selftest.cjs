@@ -601,6 +601,28 @@ check('wbLedgerKey 两区域不同键', t.wbLedgerKey('cn', 'a1') !== t.wbLedger
 check('normalizeWorkBuddy 过滤脏值', t.normalizeWorkBuddy({ daily: { a: 1, b: 'x' }, cumulative: null }),
   { daily: { a: 1 }, cumulative: {} })
 
+// ── 16. token 用量口径 ────────────────────────────────────────────────────
+// 与 cost-meter 面板一致：输入 + 缓存读 + 输出合成一个数。
+check('totalTokens 三项相加', t.totalTokens({ input: 100, output: 50, cacheRead: 1000, calls: 2 }), 1150)
+check('totalTokens 缺字段按 0', t.totalTokens({ input: 10 }), 10)
+check('totalTokens 全零但有调用记 0', t.totalTokens({ input: 0, output: 0, cacheRead: 0, calls: 3 }), 0)
+check('totalTokens 无调用记 null', t.totalTokens({ input: 0, output: 0, cacheRead: 0, calls: 0 }), null)
+check('totalTokens null', t.totalTokens(null), null)
+
+check('formatTokens 走 kilo', t.formatTokens(1200), '1200')
+// 一千万以上去掉小数：76.4M 与 76M 的差别对"今天用了多少"没有意义。
+check('formatTokens 大数缩写', t.formatTokens(76400000), '76M')
+check('formatTokens 中等数保留一位', t.formatTokens(2850000), '2.9M')
+check('formatTokens NaN', t.formatTokens(NaN), '—')
+
+// ── 17. 日期在下标里的定位 ────────────────────────────────────────────────
+{
+  const days = [{ date: '2026-11-10' }, { date: '2026-11-11' }, { date: '2026-11-12' }]
+  check('indexOfDate 命中', t.indexOfDate(days, '2026-11-11'), 1)
+  check('indexOfDate 未命中', t.indexOfDate(days, '2026-11-09'), -1)
+  check('indexOfDate 空列表', t.indexOfDate([], '2026-11-11'), -1)
+}
+
 // ── 收口 ──────────────────────────────────────────────────────────────────
 testReadChannel()
   .then(testReadChannelDetail)

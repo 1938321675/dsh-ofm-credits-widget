@@ -69,6 +69,12 @@ window.__ModuleLoader__.load({
     const LOCAL_DAILY_KEY = 'ofm-credit-watch.daily'
     /** Host 账本路由。 */
     const LEDGER_URL = '/api/ofm-credit-watch/ledger'
+    /** token 用量路由（数据来自 cost-meter 的日聚合账本）。 */
+    const USAGE_URL = '/api/ofm-credit-watch/usage'
+    /** 当前视图（列表 / 统计）持久化键。 */
+    const VIEW_KEY = 'ofm-credit-watch.view'
+    /** 统计界面一屏放几天。 */
+    const STATS_DAYS = 7
     /** 「都在安静」的判定窗口：超过它就当作不活跃。 */
     const IDLE_WINDOW_MS = 5 * 60_000
     /** 卡片默认宽度：位置换算、拖动夹取、手柄复位共用一个常量。 */
@@ -221,6 +227,21 @@ window.__ModuleLoader__.load({
         wbTitle: 'WorkBuddy 账号',
         wbColAccount: '账号',
         wbColBalance: '余额',
+        stats: 'token 统计',
+        statsBack: '返回列表',
+        statsTitle: '每日 token 用量',
+        statsUnavailable: '未连接 cost-meter',
+        statsEmpty: '这一天没有调用记录',
+        statsToday: '今日',
+        statsTotal: '合计',
+        statsOfm: 'OFM 渠道',
+        statsWb: 'WorkBuddy',
+        statsCalls: '{count} 次调用',
+        statsPrev: '前一天',
+        statsNext: '后一天',
+        statsNoData: '暂无数据',
+        tokenToday: '今日 token',
+        wbAccumulated: '累计积分',
         wbToday: '今日',
         wbTotal: '累计',
         wbUnavailable: '未连接 WorkBuddy',
@@ -275,6 +296,21 @@ window.__ModuleLoader__.load({
         wbTitle: 'WorkBuddy accounts',
         wbColAccount: 'account',
         wbColBalance: 'left',
+        stats: 'Token stats',
+        statsBack: 'Back to list',
+        statsTitle: 'Daily token usage',
+        statsUnavailable: 'cost-meter not connected',
+        statsEmpty: 'No calls on this day',
+        statsToday: 'today',
+        statsTotal: 'total',
+        statsOfm: 'OFM channels',
+        statsWb: 'WorkBuddy',
+        statsCalls: '{count} calls',
+        statsPrev: 'Previous day',
+        statsNext: 'Next day',
+        statsNoData: 'no data',
+        tokenToday: 'tokens today',
+        wbAccumulated: 'total credits',
         wbToday: 'today',
         wbTotal: 'total',
         wbUnavailable: 'WorkBuddy not connected',
@@ -813,6 +849,46 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ─── token 用量 ─────────────────────────────────────────────────────────
+
+    /**
+     * 一天的总 token 数。
+     *
+     * 与 cost-meter 面板的口径一致：输入 + 缓存读 + 输出合成一个数。
+     * 缓存读通常占大头（一次长对话能到输入输出的十几倍），把它单列出来
+     * 会让「今天用了多少」这个问题反而没有答案。
+     */
+    function totalTokens(row) {
+      if (row === null || row === undefined) return null
+      const sum = (row.input || 0) + (row.cacheRead || 0) + (row.output || 0)
+      return sum > 0 || row.calls > 0 ? sum : null
+    }
+
+    /** token 用量的紧凑写法：76.4M / 391K / 1200。 */
+    function formatTokens(value) {
+      if (!Number.isFinite(value)) return '—'
+      return kilo(value)
+    }
+
+    /** 拉 cost-meter 的按天用量。返回 { available, days }。 */
+    async function fetchUsage() {
+      const res = await fetch(USAGE_URL, { cache: 'no-store' })
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      const data = await res.json()
+      return {
+        available: data?.available === true,
+        days: Array.isArray(data?.days) ? data.days : [],
+      }
+    }
+
+    /** 在一组按日期升序的日子里取某天的下标；找不到返回 -1。 */
+    function indexOfDate(days, date) {
+      for (let i = 0; i < days.length; i += 1) {
+        if (days[i]?.date === date) return i
+      }
+      return -1
+    }
+
     /** tooltip：账号 + 各积分包构成。 */
     function tooltipOf(row) {
       const lines = []
@@ -900,6 +976,16 @@ window.__ModuleLoader__.load({
       // WorkBuddy 自己的刷新态：与渠道的 loading 分开，两者互不等待，
       // 标题栏的转圈图标把两个合成一个显示。
       const [wbLoading, setWbLoading] = useState(false)
+
+      // 视图：列表 / 统计。整张卡片切换，不额外开窗——悬浮层里再叠一层
+      // 窗口，层级与拖动都要各管一套，收益抵不上复杂度。
+      const [view, setView] = useState(() => {
+        try { return window.localStorage?.getItem(VIEW_KEY) === 'stats' ? 'stats' : 'list' } catch { return 'list' }
+      })
+      // cost-meter 的按天用量。available 为 false 表示那份账本读不到。
+      const [usage, setUsage] = useState({ available: true, days: [] })
+      // 统计界面当前选中的日期；空串表示"还没选，跟最新一天走"。
+      const [usageDate, setUsageDate] = useState('')
 
       // 上一轮读数与串行保护：轮询和手动刷新可能重叠，只允许最新一轮落库。
       const previous = useRef(null)
@@ -1110,6 +1196,20 @@ window.__ModuleLoader__.load({
       }, [poll])
 
       /**
+       * 采一轮 token 用量。
+       *
+       * 与 WorkBuddy 同一个节拍：cost-meter 的账本是"有调用才写"，拉得再勤
+       * 也不会更准。失败时保留上一轮的数据，别让统计页整片变空。
+       */
+      const pollUsage = useCallback(async () => {
+        try {
+          const next = await fetchUsage()
+          if (!alive.current) return
+          setUsage(next)
+        } catch { /* Host 没有用量路由：保持上一轮 */ }
+      }, [])
+
+      /**
        * 采一轮 WorkBuddy：读两个区域的账号积分，交给 Host 记账，取回今日与累计。
        *
        * 报给账本的是"每个账号当前的积分总量"。跳不跳过一个账号由 Host 判断
@@ -1147,10 +1247,14 @@ window.__ModuleLoader__.load({
           if (alive.current) setWbLedger(ledger)
         }).catch(() => { /* Host 没有 wb 账本路由，等采样时再试 */ })
         void pollWorkBuddy()
+        void pollUsage()
         let timer
         const start = () => {
           if (timer !== undefined) return
-          timer = window.setInterval(() => { void pollWorkBuddy() }, WB_POLL_MS)
+          timer = window.setInterval(() => {
+            void pollWorkBuddy()
+            void pollUsage()
+          }, WB_POLL_MS)
         }
         const stop = () => {
           if (timer === undefined) return
@@ -1159,7 +1263,7 @@ window.__ModuleLoader__.load({
         }
         // 与 OFM 轮询同一套可见性规则：看不见的时候不采样。
         const onVisibility = () => {
-          if (document.visibilityState === 'visible') { void pollWorkBuddy(); start() } else { stop() }
+          if (document.visibilityState === 'visible') { void pollWorkBuddy(); void pollUsage(); start() } else { stop() }
         }
         start()
         document.addEventListener('visibilitychange', onVisibility)
@@ -1167,7 +1271,7 @@ window.__ModuleLoader__.load({
           stop()
           document.removeEventListener('visibilitychange', onVisibility)
         }
-      }, [pollWorkBuddy])
+      }, [pollWorkBuddy, pollUsage])
 
       // 每 10 秒走一次"现在"，让"3 分钟前有消耗"这类相对时间自己走字，
       // 而不用为了刷新相对时间重发 RPC。
@@ -1448,7 +1552,62 @@ window.__ModuleLoader__.load({
         },
         // 八个缩放热区：平时完全透明（卡片看起来没有任何装饰），鼠标贴到边上
         // 才由处理器刷上提示色。角排在边之后、层级更高，重叠处归角。
-        // WorkBuddy 分区：与渠道行同一套视觉语言，多一列"当前余额"。
+        // ── 统计界面 ──
+        statsWrap: { padding: '2px 0 6px' },
+        statsNav: {
+          display: 'flex', alignItems: 'center', gap: 4, padding: '4px 8px 6px',
+        },
+        statsArrow: {
+          width: 22, height: 22, flex: '0 0 22px', padding: 0, borderRadius: 6,
+          border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.22))',
+          background: 'transparent', color: 'inherit', cursor: 'pointer',
+          fontSize: 13, lineHeight: 1, fontFamily: 'inherit',
+        },
+        statsDate: {
+          flex: 1, textAlign: 'center', fontSize: 11.5, fontVariantNumeric: 'tabular-nums',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+        },
+        statsTodayTag: {
+          fontSize: 9.5, padding: '0 4px', borderRadius: 999,
+          border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3))',
+          color: 'var(--dsw-alias-label-secondary, #888)',
+        },
+        // 三个大数字并排：合计给得最大，它是这一页要回答的问题。
+        statsTotals: {
+          display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr', gap: 6,
+          padding: '2px 10px 8px',
+        },
+        statsTotalCell: { minWidth: 0 },
+        statsTotalLabel: {
+          fontSize: 9.5, color: 'var(--dsw-alias-label-secondary, #888)',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        },
+        statsTotalValue: {
+          fontSize: 15, fontWeight: 600, fontVariantNumeric: 'tabular-nums',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        },
+        statsRow: {
+          display: 'grid', gridTemplateColumns: '3px 1fr 64px',
+          alignItems: 'center', gap: 8, padding: '4px 10px 4px 7px',
+        },
+        statsNameCell: { minWidth: 0, display: 'flex', flexDirection: 'column' },
+        statsName: { fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+        statsAmount: {
+          textAlign: 'right', fontSize: 11.5, fontWeight: 600,
+          fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
+        },
+        statsHint: {
+          padding: '6px 10px 8px', color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 10.5,
+        },
+        statsWbTotal: {
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+          marginTop: 4, padding: '6px 10px 4px',
+          borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))',
+          fontSize: 10.5, color: 'var(--dsw-alias-label-secondary, #888)',
+        },
+        statsWbAmount: { fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: 'var(--dsw-alias-label-primary, inherit)' },
+        // ── WorkBuddy 分区 ──
+        // 与渠道行同一套视觉语言，多一列当前余额。
         wbWrap: { borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))' },
         wbHead: {
           display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
@@ -1460,15 +1619,15 @@ window.__ModuleLoader__.load({
           color: 'var(--dsw-alias-label-secondary, #888)', fontVariantNumeric: 'tabular-nums',
           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         },
-        // 四列：账号 / 今日 / 累计 / 余额。与渠道行对齐，右三列都右对齐。
+        // 三列：账号 / 今日 / 余额。累计消耗已移到统计界面，主界面只留当天。
         // 列头与账号行共用同一套网格，改列宽只改这一处。
         wbRow: {
-          display: 'grid', gridTemplateColumns: '1fr 48px 48px 56px',
+          display: 'grid', gridTemplateColumns: '1fr 52px 60px',
           alignItems: 'center', gap: 8, padding: '4px 10px',
         },
         // 列头：比账号行再小半号、更淡一档，读完就该忽略掉。
         wbColHead: {
-          display: 'grid', gridTemplateColumns: '1fr 48px 48px 56px',
+          display: 'grid', gridTemplateColumns: '1fr 52px 60px',
           alignItems: 'center', gap: 8, padding: '1px 10px 3px',
           fontSize: 10, color: 'var(--dsw-alias-label-secondary, #888)',
         },
@@ -1491,11 +1650,97 @@ window.__ModuleLoader__.load({
         }),
       }
 
+      // 用量派生量：统计页与 WorkBuddy 分区都要用，统一在两者之前算好。
+      // 今日 token 取账本里最新的一天（也就是今天），所有账号合成一个数。
+      const latestUsage = usage.days.length === 0 ? null : usage.days[usage.days.length - 1]
+      const wbTokensToday = latestUsage === null ? null : totalTokens(latestUsage.workbuddy)
+      // WorkBuddy 所有账号的累计积分合计：主界面不再显示，统计界面给一行。
+      const wbAccumulatedTotal = sumSpend(wbRows.map(row => wbLedger.cumulative[row.key]))
+
+      // ── 统计界面 ────────────────────────────────────────────────────────
+      // 整张卡片切换成统计页：顶部日期条、当天合计、OFM 渠道逐行、WorkBuddy 合计。
+      // 主界面的 WorkBuddy 分区只保留当日积分，累计消耗挪到这里。
+      const statsSection = (() => {
+        if (!usage.available) {
+          return h('div', { style: style.statsWrap, 'data-ofm-credit-watch-stats': 'unavailable' },
+            h('div', { style: style.statsHint }, t('statsUnavailable')))
+        }
+        const days = usage.days.slice(-STATS_DAYS)
+        if (days.length === 0) {
+          return h('div', { style: style.statsWrap, 'data-ofm-credit-watch-stats': 'empty' },
+            h('div', { style: style.statsHint }, t('statsNoData')))
+        }
+        // 选中日期：空串或找不到时跟最新一天走，这样跨天后不会停在空页上。
+        const pickedIndex = indexOfDate(days, usageDate) === -1 ? days.length - 1 : indexOfDate(days, usageDate)
+        const picked = days[pickedIndex]
+        const ofmTotal = totalTokens(picked.ofm)
+        const wbTotal = totalTokens(picked.workbuddy)
+        // 渠道行只列当天有调用的，没调用的渠道不占地方。
+        const channels = CHANNELS
+          .map(channel => ({ channel, row: picked.byChannel?.[channel.id] }))
+          .filter(item => item.row !== undefined && (item.row.calls > 0 || totalTokens(item.row) !== null))
+
+        const step = delta => {
+          const next = pickedIndex + delta
+          if (next < 0 || next >= days.length) return
+          setUsageDate(days[next].date)
+        }
+
+        return h('div', { style: style.statsWrap, 'data-ofm-credit-watch-stats': 'section' },
+          // 日期条：左右箭头 + 当天日期 + 今日标记。
+          h('div', { style: style.statsNav },
+            h('button', {
+              type: 'button', style: style.statsArrow,
+              title: t('statsPrev'), disabled: pickedIndex <= 0,
+              onClick: () => step(-1),
+              'data-act': 'stats-prev',
+            }, '‹'),
+            h('span', { style: style.statsDate },
+              picked.date,
+              picked.date === latestUsage?.date ? h('span', { style: style.statsTodayTag }, t('statsToday')) : null),
+            h('button', {
+              type: 'button', style: style.statsArrow,
+              title: t('statsNext'), disabled: pickedIndex >= days.length - 1,
+              onClick: () => step(1),
+              'data-act': 'stats-next',
+            }, '›')),
+
+          // 三个大数字：合计 / OFM / WorkBuddy。
+          h('div', { style: style.statsTotals },
+            h('div', { style: style.statsTotalCell },
+              h('div', { style: style.statsTotalLabel }, t('statsTotal')),
+              h('div', { style: style.statsTotalValue },
+                formatTokens((ofmTotal || 0) + (wbTotal || 0)))),
+            h('div', { style: style.statsTotalCell },
+              h('div', { style: style.statsTotalLabel }, t('statsOfm')),
+              h('div', { style: style.statsTotalValue }, formatTokens(ofmTotal))),
+            h('div', { style: style.statsTotalCell },
+              h('div', { style: style.statsTotalLabel }, t('statsWb')),
+              h('div', { style: style.statsTotalValue, 'data-wb-token-total': 'true' }, formatTokens(wbTotal)))),
+
+          // 渠道明细：当天有调用的渠道逐行列出。
+          channels.length === 0
+            ? h('div', { style: style.statsHint }, t('statsEmpty'))
+            : channels.map(item => h('div', {
+              key: item.channel.id, style: style.statsRow, 'data-stats-channel': item.channel.id,
+            },
+              h('span', { style: { ...style.stripe, background: item.channel.accent } }),
+              h('span', { style: style.statsNameCell },
+                h('span', { style: style.statsName }, item.channel.name),
+                h('span', { style: style.meta }, fill(t('statsCalls'), { count: item.row.calls || 0 }))),
+              h('span', { style: style.statsAmount }, formatTokens(totalTokens(item.row))),
+            )),
+
+          // WorkBuddy 累计积分：所有账号合并，放在这里是因为主界面只需要当天。
+          wbAccumulatedTotal === null ? null : h('div', { style: style.statsWbTotal },
+            h('span', null, t('wbAccumulated')),
+            h('span', { style: style.statsWbAmount }, '−' + formatAmount(wbAccumulatedTotal, 'credits'))),
+        )
+      })()
       // ── WorkBuddy 分区 ──────────────────────────────────────────────────
       // 与渠道列表共用同一个滚动区：卡片拉高时一起滚，不额外占一条滚动条。
       // 头部常驻，折叠时只留汇总数字，展开才逐账号列。
       const wbTodaySum = sumSpend(wbRows.map(row => wbLedger.daily[row.key]))
-      const wbTotalSum = sumSpend(wbRows.map(row => wbLedger.cumulative[row.key]))
       const wbSection = (() => {
         if (!wbConnected) {
           return h('div', { style: style.wbWrap, 'data-ofm-credit-watch-wb': 'unavailable' },
@@ -1517,7 +1762,8 @@ window.__ModuleLoader__.load({
             h('span', { style: style.wbTitle }, t('wbTitle')),
             h('span', { style: style.wbSum },
               wbTodaySum === null ? '—' : `${t('wbToday')} −${formatAmount(wbTodaySum, 'credits')}`,
-              wbTotalSum === null ? '' : ` · ${t('wbTotal')} −${formatAmount(wbTotalSum, 'credits')}`),
+              // 今日 token：所有账号合起来一个数，与 cost-meter 面板口径一致。
+              wbTokensToday === null ? '' : ` · ${formatTokens(wbTokensToday)} tok`),
             h('span', { style: style.meta }, wbOpen ? '▾' : '▸')),
           wbRows.length === 0
             ? h('div', { style: style.wbEmpty }, t('wbNoAccounts'))
@@ -1526,11 +1772,9 @@ window.__ModuleLoader__.load({
               h('div', { key: '__colhead', style: style.wbColHead, 'data-wb-colhead': 'true' },
                 h('span', null, t('wbColAccount')),
                 h('span', { style: style.wbColHeadCell }, t('wbToday')),
-                h('span', { style: style.wbColHeadCell }, t('wbTotal')),
                 h('span', { style: style.wbColHeadCell }, t('wbColBalance'))),
               ...wbRows.map(row => {
               const usedToday = wbLedger.daily[row.key]
-              const usedTotal = wbLedger.cumulative[row.key]
               return h('div', { key: row.key, style: style.wbRow, 'data-wb-account': row.key },
                 h('span', { style: style.wbNameCell },
                   h('span', { style: style.wbName, title: row.name }, row.name),
@@ -1542,10 +1786,6 @@ window.__ModuleLoader__.load({
                 h('span', { style: style.wbCell },
                   Number.isFinite(usedToday)
                     ? `−${formatAmount(usedToday, 'credits')}`
-                    : '·'),
-                h('span', { style: style.wbCell },
-                  Number.isFinite(usedTotal)
-                    ? `−${formatAmount(usedTotal, 'credits')}`
                     : '·'),
                 h('span', { style: style.wbAmount },
                   Number.isFinite(row.credits) ? formatAmount(row.credits, 'credits') : t('wbNoCredits')))
@@ -1587,6 +1827,25 @@ window.__ModuleLoader__.load({
           h('span', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' } },
             h('span', { style: style.title }, t('title')),
             h('span', { style: style.sub }, headerWhen)),
+          // 统计视图开关：整张卡片切换到 token 统计页。
+          h('button', {
+            type: 'button',
+            style: { ...style.iconBtn, color: view === 'stats' ? 'var(--dsw-alias-brand-primary, #4b7bec)' : style.iconBtn.color },
+            title: view === 'stats' ? t('statsBack') : t('stats'),
+            'aria-pressed': view === 'stats' ? 'true' : 'false',
+            'data-act': 'stats',
+            onPointerDown: event => event.stopPropagation(),
+            onClick: event => {
+              event.stopPropagation()
+              setView(current => {
+                const next = current === 'stats' ? 'list' : 'stats'
+                try { window.localStorage?.setItem(VIEW_KEY, next) } catch { /* 存储不可用 */ }
+                // 进统计页时收起配置面板：两者都是整块内容，叠在一起没意义。
+                if (next === 'stats') setConfigOpen(false)
+                return next
+              })
+            },
+          }, '▤'),
           h('button', {
             type: 'button', style: style.iconBtn,
             title: busy ? t('refreshing') : t('refresh'),
@@ -1632,7 +1891,9 @@ window.__ModuleLoader__.load({
             onClick: event => { event.stopPropagation(); setHidden(true) },
           }, '✕')),
         collapsed ? null : h('div', { style: style.body },
-          rows.length === 0
+          // 统计视图：整块替换掉渠道列表与 WorkBuddy 分区。
+          view === 'stats' ? statsSection
+          : rows.length === 0
             ? h('div', { style: style.empty }, error !== '' ? error : t('never'))
             : ordered.length === 0
               // 全部被隐藏：给出回程路径，而不是留一片空白让人以为坏了。
@@ -1772,6 +2033,7 @@ window.__ModuleLoader__.load({
       CreditWatch, readChannel, channelRpc, kilo, signedKilo, span, fill,
       normalizeHidden, toggleHidden, CHANNELS, DICT, HIDDEN_KEY, WB_OPEN_KEY,
       mapLimit, shouldPollChannel, failureRow, sumSpend, wbLedgerKey,
+      totalTokens, formatTokens, fetchUsage, indexOfDate, USAGE_URL, VIEW_KEY, STATS_DAYS,
       fetchWorkBuddyRegion, normalizeWorkBuddy, MAX_CONCURRENCY, HIDDEN_POLL_MS, STALE_ROW_MS, WB_POLL_MS,
       formatAmount, unitOf, toneOf, expireOf, tooltipOf, normalizeTotals,
       accumulateLocal, loadLocalDaily, loadPos, leftOf, localDate, round2,

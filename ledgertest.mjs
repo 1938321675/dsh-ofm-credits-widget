@@ -272,6 +272,61 @@ async function main() {
     check('读数变化后落盘', JSON.parse(fs.readFileSync(path.join(dir, 'last.json'), 'utf8')).totals.qoder, 480)
   }
 
+  // ── 17. 用量汇总 ──────────────────────────────────────────────────────
+  {
+    const dir = freshDir()
+    const ledger = path.join(dir, 'ledger.json')
+    fs.writeFileSync(ledger, JSON.stringify({
+      version: 1,
+      days: {
+        '2026-11-10': { date: '2026-11-10', byProviderModel: {
+          'qoder:some-model': { input: 100, output: 50, cacheRead: 1000, calls: 2 },
+          'trae:another:model': { input: 10, output: 5, cacheRead: 100, calls: 1 },
+          'workbuddy:deepseek-v4': { input: 7, output: 3, cacheRead: 70, calls: 4 },
+          'openai-codex:gpt-6.1': { input: 999, output: 999, cacheRead: 999, calls: 9 },
+        } },
+        '2026-11-11': { date: '2026-11-11', byProviderModel: {
+          'workbuddy-global:kimi': { input: 1, output: 1, cacheRead: 1, calls: 1 },
+        } },
+      },
+    }), 'utf8')
+    process.env.OFM_COST_METER_LEDGER = ledger
+    // 缓存按 mtime+size 命中，换文件后必须显式清掉。
+    t.usageCache.key = ''
+
+    const stats = t.readUsageStats()
+    check('用量账本可读', stats.available, true)
+    check('按日期升序', stats.days.map(d => d.date), ['2026-11-10', '2026-11-11'])
+
+    const first = stats.days[0]
+    // OFM 只算自己的渠道；openai-codex 不在名单里，必须排除。
+    check('OFM 输入只算自己的渠道', first.ofm.input, 110)
+    check('OFM 输出', first.ofm.output, 55)
+    check('OFM 缓存读', first.ofm.cacheRead, 1100)
+    check('OFM 调用数', first.ofm.calls, 3)
+    check('WorkBuddy 合并两个区域', stats.days[0].workbuddy.input + stats.days[1].workbuddy.input, 8)
+    check('WorkBuddy 单日调用', first.workbuddy.calls, 4)
+    check('渠道明细按 provider 归并', first.byChannel.qoder.input, 100)
+    check('模型名带冒号也切对', first.byChannel.trae.input, 10)
+    check('未出现的渠道不在明细里', first.byChannel.raccoon, undefined)
+
+    // 账本不存在：available 为 false，days 为空。
+    process.env.OFM_COST_METER_LEDGER = path.join(dir, 'nope.json')
+    t.usageCache.key = ''
+    const missing = t.readUsageStats()
+    check('账本缺失时 available 为 false', missing.available, false)
+    check('账本缺失时没有天数', missing.days, [])
+
+    // 缓存：同一份文件第二次读应当复用（mtime+size 不变）。
+    process.env.OFM_COST_METER_LEDGER = ledger
+    t.usageCache.key = ''
+    const a = t.readUsageStats()
+    const b = t.readUsageStats()
+    check('缓存命中返回同一对象', a === b, true)
+    delete process.env.OFM_CREDIT_WATCH_DIR === undefined ? 'x' : 'x'
+    delete process.env.OFM_COST_METER_LEDGER
+  }
+
   if (failures.length > 0) {
     console.error(`✗ ${failures.length}/${checks} 项失败`)
     for (const line of failures) console.error('  - ' + line)

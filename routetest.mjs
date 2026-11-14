@@ -14,6 +14,9 @@ import path from 'node:path'
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ofm-credit-watch-route-'))
 process.env.OFM_CREDIT_WATCH_DIR = temp
+// 用量路由默认读用户真实的 cost-meter 账本；测试指向一个不存在的文件，
+// 这样断言的是"读不到账本时的行为"，而不是当天真实用量。
+process.env.OFM_COST_METER_LEDGER = path.join(temp, 'no-such-ledger.json')
 
 const failures = []
 let checks = 0
@@ -174,6 +177,19 @@ async function main() {
 
       const bad = await fetch(`${base}/wb`, { method: 'DELETE' })
       check('wb DELETE 返回 405', bad.status, 405)
+    }
+
+    // ── token 用量：/usage ──
+    {
+      const res = await fetch(`${base}/usage`)
+      check('GET usage 200', res.status, 200)
+      const body = await res.json()
+      // 测试环境默认没有 cost-meter 账本：应当是 available=false 而不是报错。
+      check('无账本时 available 为 false', body.available, false)
+      check('无账本时 days 为空', body.days, [])
+
+      const bad = await fetch(`${base}/usage`, { method: 'POST' })
+      check('usage POST 返回 405', bad.status, 405)
     }
 
     // ── 方法不支持 ──

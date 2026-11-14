@@ -29,7 +29,7 @@
  * @module dsh-ofm-credit-watch
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
@@ -337,6 +337,101 @@ function commitWorkBuddy(readings) {
   return { date, daily, cumulative, deltas }
 }
 
+// ── 模型用量（token）统计 ───────────────────────────────────────────────────
+
+/**
+ * 用量数据来自 cost-meter 的日聚合账本。
+ *
+ * 它是唯一一份「按天 × provider × model」的现成记录：插件运行期间每笔调用
+ * 都会落在这里，不需要我们再从会话日志里重算一遍——重算会与 cost-meter 的
+ * 口径漂移，而且会话日志是 zstd 多帧、解析成本高得多。
+ *
+ * 账本 1.7MB 量级，且是「有调用才写」，所以按 mtime + size 做一层缓存：
+ * 面板每 5 分钟轮询一次，命中缓存时只 stat 一次文件。
+ */
+function usageLedgerFile() {
+  return process.env.OFM_COST_METER_LEDGER ||
+    path.join(DSH_HOME, 'storages', 'cost-meter', 'ledger.json')
+}
+
+/** OFM 的十个渠道在账本里各自是独立的 provider 前缀。 */
+const OFM_PROVIDERS = [
+  'lobsterai', 'qoder', 'qodercn', 'trae', 'cline',
+  'loomy', 'raccoon', 'minimax', 'zcode', 'gemini',
+]
+
+/** WorkBuddy 两个区域的前缀；面板把它们合成一个总数。 */
+const WORKBUDDY_PROVIDERS = ['workbuddy', 'workbuddy-global']
+
+/** 缓存：文件指纹没变就不重新解析。 */
+let usageCache = { key: '', value: null }
+
+/** 把一条 byProviderModel 记录累加进目标桶。 */
+function addUsage(target, row) {
+  target.input += Number.isFinite(row?.input) ? row.input : 0
+  target.output += Number.isFinite(row?.output) ? row.output : 0
+  target.cacheRead += Number.isFinite(row?.cacheRead) ? row.cacheRead : 0
+  target.calls += Number.isFinite(row?.calls) ? row.calls : 0
+  return target
+}
+
+function emptyUsage() {
+  return { input: 0, output: 0, cacheRead: 0, calls: 0 }
+}
+
+/**
+ * 读账本并按天汇总成面板要的形状。
+ *
+ * 返回 `{ available, days: [{ date, ofm, workbuddy, byChannel }] }`，日期升序。
+ * 账本缺失或读不出来时 `available: false`——面板据此显示「未连接 cost-meter」，
+ * 而不是把 0 当成"今天没花"。
+ */
+function readUsageStats() {
+  const file = usageLedgerFile()
+  let stat
+  try {
+    stat = statSync(file)
+  } catch {
+    return { available: false, ledger: file, days: [] }
+  }
+  const key = `${stat.mtimeMs}:${stat.size}`
+  if (usageCache.key === key && usageCache.value !== null) return usageCache.value
+
+  let ledger
+  try {
+    ledger = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return { available: false, ledger: file, days: [] }
+  }
+
+  const ofmSet = new Set(OFM_PROVIDERS)
+  const wbSet = new Set(WORKBUDDY_PROVIDERS)
+  const days = []
+  for (const [date, day] of Object.entries(ledger?.days ?? {})) {
+    const rows = day?.byProviderModel
+    if (rows === null || typeof rows !== 'object') continue
+    const ofm = emptyUsage()
+    const workbuddy = emptyUsage()
+    const byChannel = {}
+    for (const [prefix, row] of Object.entries(rows)) {
+      // 账本键是 `provider:model`；模型名里可能还有冒号，只切第一个。
+      const colon = prefix.indexOf(':')
+      const provider = colon === -1 ? prefix : prefix.slice(0, colon)
+      if (wbSet.has(provider)) { addUsage(workbuddy, row); continue }
+      if (!ofmSet.has(provider)) continue
+      addUsage(ofm, row)
+      if (byChannel[provider] === undefined) byChannel[provider] = emptyUsage()
+      addUsage(byChannel[provider], row)
+    }
+    days.push({ date, ofm, workbuddy, byChannel })
+  }
+  days.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+
+  const value = { available: true, ledger: file, days }
+  usageCache = { key, value }
+  return value
+}
+
 // ── HTTP ────────────────────────────────────────────────────────────────────
 
 /**
@@ -409,6 +504,10 @@ async function handleApi(req, res) {
       }
       return sendJson(res, 405, { error: 'method not allowed' })
     }
+    if (route === '/usage') {
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
+      return sendJson(res, 200, readUsageStats())
+    }
     if (route === '/ping') return sendJson(res, 200, { ok: true })
     return sendJson(res, 404, { error: 'not found' })
   } catch (error) {
@@ -439,4 +538,5 @@ export function apply(ctx) {
 export const __test = {
   commitReadings, readLedger, normalizeLast, todayKey, round2, ledgerDir,
   wbKey, readWorkBuddyLedger, commitWorkBuddy, WB_STALE_MS, WB_RESAVE_MS, RESAVE_MS, STALE_MS,
+  readUsageStats, usageLedgerFile, OFM_PROVIDERS, WORKBUDDY_PROVIDERS, usageCache,
 }
