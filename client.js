@@ -1445,36 +1445,46 @@ window.__ModuleLoader__.load({
        *
        * 两块（主界面 / 统计界面）的分隔条行为完全一样，只是写回的状态与
        * 持久化键不同，所以抽成一个工厂，不写两份。
+       *
+       * 按下之后把 pointermove / pointerup 挂到 window 上，而不是靠元素自己的
+       * pointer capture：拖动会改状态、触发重渲染，一旦分隔条那个 DOM 节点被
+       * 换掉，捕获就失效、后续事件全丢，表现就是「光标变了但拖不动」。挂在
+       * window 上则与元素存亡无关，指针拖出卡片范围也不会中断。
        */
       function makeSplitHandlers({ listSelector, onChange, onCommit, onReset }) {
+        const stop = () => {
+          const state = splitDrag.current
+          splitDrag.current = null
+          window.removeEventListener('pointermove', move)
+          window.removeEventListener('pointerup', stop)
+          window.removeEventListener('pointercancel', stop)
+          if (state !== null) state.onCommit()
+        }
+        const move = event => {
+          const state = splitDrag.current
+          if (state === null) return
+          state.onChange(clampStatsSplit(state.startHeight + (event.clientY - state.startY), state.maxHeight))
+          event.preventDefault()
+        }
         return {
           onPointerDown: event => {
             if (event.button !== undefined && event.button !== 0) return
-            const target = event.currentTarget
-            const list = target?.parentElement?.querySelector?.(listSelector)
+            const list = event.currentTarget?.parentElement?.querySelector?.(listSelector)
             if (list === null || list === undefined) return
+            // 上限取卡片内容区的可视高度：两块加起来不用超过一屏，
+            // 否则往下拖时列表长到看不见边，反而不知道拖到哪了。
+            const viewport = list.parentElement?.clientHeight || 320
             splitDrag.current = {
               startY: event.clientY,
               startHeight: list.offsetHeight,
-              maxHeight: Math.max(STATS_SPLIT_MIN, list.offsetHeight + (list.parentElement?.offsetHeight ?? 0) - STATS_SPLIT_MIN),
+              maxHeight: Math.max(STATS_SPLIT_MIN, viewport - STATS_SPLIT_MIN),
               onChange, onCommit,
             }
-            try { target.setPointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
+            window.addEventListener('pointermove', move)
+            window.addEventListener('pointerup', stop)
+            window.addEventListener('pointercancel', stop)
             event.preventDefault()
             event.stopPropagation()
-          },
-          onPointerMove: event => {
-            const state = splitDrag.current
-            if (state === null) return
-            state.onChange(clampStatsSplit(state.startHeight + (event.clientY - state.startY), state.maxHeight))
-            event.preventDefault()
-          },
-          onPointerUp: event => {
-            if (splitDrag.current === null) return
-            const state = splitDrag.current
-            splitDrag.current = null
-            try { event.currentTarget?.releasePointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
-            state.onCommit()
           },
           onDoubleClick: event => {
             event.preventDefault()
@@ -1618,13 +1628,19 @@ window.__ModuleLoader__.load({
           color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 13, lineHeight: 1, borderRadius: 6,
         },
         // 高度自适应时列表最多 320 高；用户拉过右下角之后改成吃满剩余空间。
-        // 两条路都靠自身滚动，卡片不会被内容撑开。
-        body: size.height === null || collapsed
-          ? { maxHeight: 320, overflowY: 'auto', padding: '4px 0 6px' }
-          : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0 6px' },
+        //
+        // 拖过分隔条之后这两种都放开：列表高度由用户指定，再套一层
+        // maxHeight + 滚动就变成「列表没变高、只是里面滚了」，拖动看起来没反应。
+        // 此时让 body 随内容长高，卡片本身是 height:auto，会跟着变。
+        body: mainSplit !== null
+          ? { overflowY: 'visible', padding: '4px 0 6px' }
+          : size.height === null || collapsed
+            ? { maxHeight: 320, overflowY: 'auto', padding: '4px 0 6px' }
+            : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0 6px' },
         // 主界面渠道列表：没拖过横条时随内容长；拖过之后固定高度并自己滚动。
         mainListAuto: { overflowY: 'auto' },
-        mainList: { overflowY: 'auto' },
+        // 固定高度时靠自身滚动；flexShrink 0 防止被下面的分区挤压。
+        mainList: { overflowY: 'auto', flexShrink: 0 },
         // 主界面分隔条：与统计界面那条同一手感，抓取区 7px。
         mainSplitter: {
           height: 7, margin: '1px 0', cursor: 'row-resize', touchAction: 'none',
@@ -1754,7 +1770,8 @@ window.__ModuleLoader__.load({
         statsWbAmount: { fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: 'var(--dsw-alias-label-primary, inherit)' },
         // ── WorkBuddy 分区 ──
         // 与渠道行同一套视觉语言，多一列当前余额。
-        wbWrap: { borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))' },
+        // 上边框由分隔条负责画：这里再画一条就成了并排的两条线。
+        wbWrap: {},
         wbHead: {
           display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
           cursor: 'pointer', fontSize: 11.5, fontWeight: 600,

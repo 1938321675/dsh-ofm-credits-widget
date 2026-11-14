@@ -376,11 +376,64 @@ check('收起时不显示配置面板',
   const sized = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.mainSplit]: 180 })
   check('拖过之后渠道列表带固定高度', mainListOf(sized)?.props.style?.height, 180)
 
+  // body 在拖过分隔条后必须放开高度上限与滚动，否则列表只是「里面滚了」，
+  // 高度没变，拖动看起来毫无反应。
+  const panelOf = tree => flatten(tree).find(n => n.props !== undefined && n.props['data-ofm-credit-watch'] === 'panel')
+  const bodyOf = tree => flatten(tree).find(n => n.props !== undefined
+    && n.props.style !== undefined && n.props.style.padding === '4px 0 6px')
+  check('没拖过时 body 限制高度', bodyOf(list)?.props.style?.maxHeight, 320)
+  check('拖过之后 body 放开高度限制', bodyOf(sized)?.props.style?.maxHeight, undefined)
+  check('拖过之后 body 不做自身滚动', bodyOf(sized)?.props.style?.overflowY, 'visible')
+  void panelOf
+
   // 统计视图与设置面板里，上半区不是列表，分隔条不出现。
   check('统计视图没有主界面分隔条',
     mainSplitterOf(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats' })), undefined)
   check('设置面板展开时没有主界面分隔条',
     mainSplitterOf(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.configOpen]: true })), undefined)
+}
+
+// ── 4e. 拖动分隔条真的会改高度 ────────────────────────────────────────────
+// 这里验证的是拖动链路本身：按下 → window 上的 pointermove → 状态变化。
+// 之前用元素自己的 pointer capture，重渲染换掉节点后事件就断了，
+// 表现为"光标变了但拖不动"，所以听的是 window。
+{
+  const handlers = {}
+  global.window.addEventListener = (type, fn) => { handlers[type] = fn }
+  global.window.removeEventListener = (type) => { delete handlers[type] }
+
+  const list = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })
+  const splitter = flatten(list).find(n => n.props !== undefined && n.props['data-main-splitter'] === 'true')
+  check('分隔条带按下处理', typeof splitter?.props.onPointerDown, 'function')
+
+  // 造一个够用的 DOM 桩：分隔条的父节点能查到列表，列表有高度。
+  const fakeList = { offsetHeight: 120, parentElement: { clientHeight: 400, offsetHeight: 400 } }
+  const fakeParent = { querySelector: () => fakeList }
+  const fakeEvent = {
+    button: 0, clientY: 100,
+    currentTarget: { parentElement: fakeParent },
+    preventDefault() {}, stopPropagation() {},
+  }
+
+  splitter.props.onPointerDown(fakeEvent)
+  check('按下后挂了 window pointermove', typeof handlers.pointermove, 'function')
+  check('按下后挂了 window pointerup', typeof handlers.pointerup, 'function')
+
+  // 往下拖 60px：高度应变成 120 + 60 = 180。
+  handlers.pointermove({ clientY: 160, preventDefault() {} })
+  check('拖动改变渠道列表高度', hooks[IDX.mainSplit], 180)
+
+  // 继续拖到远超上限：夹在可视高度之内。
+  handlers.pointermove({ clientY: 99999, preventDefault() {} })
+  check('拖动高度被夹进可视区', hooks[IDX.mainSplit], 400 - t.STATS_SPLIT_MIN)
+
+  // 松手：监听器要摘掉，且高度落盘。
+  handlers.pointerup({})
+  check('松手后摘掉 pointermove', handlers.pointermove, undefined)
+  check('松手后摘掉 pointerup', handlers.pointerup, undefined)
+  check('松手后高度已落盘', global.window.localStorage.getItem(t.MAIN_SPLIT_KEY), String(400 - t.STATS_SPLIT_MIN))
+
+  global.window.localStorage.setItem(t.MAIN_SPLIT_KEY, '')
 }
 
 // ── 5. 隐藏后合计与列表一致 ───────────────────────────────────────────────
