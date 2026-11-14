@@ -439,7 +439,9 @@ check('收起时不显示配置面板',
 
   // 继续拖到远超上限：夹在可视高度之内。
   handlers.pointermove({ clientY: 99999, preventDefault() {} })
-  check('拖动高度被夹进可视区', hooks[IDX.mainSplit], 400 - t.STATS_SPLIT_MIN)
+  // 上限 = 内容高度(90) + 下方余量(400-120=280) = 370，
+  // 不再是「可用高度 − 48」那种推算值。
+  check('拖动高度被夹进上限', hooks[IDX.mainSplit], 370)
 
   // 双向都要跟手。基准是按下那一刻的静态值，任何位置都能落在
   // (startHeight + 位移) 上，不会出现「只能变大、拖不回去」。
@@ -456,7 +458,7 @@ check('收起时不显示配置面板',
   // 拉到底停在下限——下限是内容自然高度（scrollHeight=90），
   // 不是固定 48：钉在 48 会把行压扁，而横线却不动。
   handlers.pointermove({ clientY: 90000, preventDefault() {} })
-  check('拉到顶停在上限', hooks[IDX.mainSplit], 400 - t.STATS_SPLIT_MIN)
+  check('拉到顶停在上限', hooks[IDX.mainSplit], 370)
   handlers.pointermove({ clientY: -90000, preventDefault() {} })
   check('拉到底停在内容高度', hooks[IDX.mainSplit], 90)
 
@@ -466,6 +468,38 @@ check('收起时不显示配置面板',
   check('松手后摘掉 pointerup', handlers.pointerup, undefined)
   check('松手后高度已落盘', global.window.localStorage.getItem(t.MAIN_SPLIT_KEY), '90')
 
+  global.window.localStorage.setItem(t.MAIN_SPLIT_KEY, '')
+}
+
+// ── 4f. 回归：卡片很矮时向下拖仍能变大 ────────────────────────────────────
+// 曾经的 bug：上限按「body.clientHeight − 48」推算。卡片高度自适应时 body 只有
+// 内容那么高（四个渠道约 90px），算出的上限反而小于内容高度，任何方向都被夹到
+// 同一个值——表现就是「向下拖，横线反而往上跳」。
+{
+  const handlers = {}
+  global.window.addEventListener = (type, fn) => { handlers[type] = fn }
+  global.window.removeEventListener = (type) => { delete handlers[type] }
+
+  const list = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })
+  const splitter = flatten(list).find(n => n.props !== undefined && n.props['data-main-splitter'] === 'true')
+
+  // 模拟真实的自适应卡片：body 只有内容高度（90），列表恰好占满它。
+  const shortList = { offsetHeight: 90, scrollHeight: 90, parentElement: { clientHeight: 90, offsetHeight: 90 } }
+  splitter.props.onPointerDown({
+    button: 0, clientY: 100,
+    currentTarget: { parentElement: { querySelector: () => shortList } },
+    preventDefault() {}, stopPropagation() {},
+  })
+
+  // 向下拖 50px：必须变大，且等于 90 + 50。
+  handlers.pointermove({ clientY: 150, preventDefault() {} })
+  check('矮卡片上向下拖会变大', hooks[IDX.mainSplit], 140)
+
+  // 向上拖回：必须变小。
+  handlers.pointermove({ clientY: 70, preventDefault() {} })
+  check('矮卡片上向上拖会变小', hooks[IDX.mainSplit], 90)
+
+  handlers.pointerup({})
   global.window.localStorage.setItem(t.MAIN_SPLIT_KEY, '')
 }
 

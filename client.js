@@ -1488,15 +1488,22 @@ window.__ModuleLoader__.load({
             // 一大就到底，往下拖会立刻没有余量。
             const body = list.parentElement
             const available = body?.clientHeight || 320
-            if (typeof onStart === 'function') onStart(available)
+            if (typeof onStart === 'function') onStart()
             // 下限用实测的内容自然高度：渠道 4 个时内容只有 ~90px，钉在 48 会把行压扁。
             // scrollHeight 是「不滚动时该有多高」，拖到它就停住，行高保持正常。
             const natural = Math.round(list.scrollHeight)
-            const ceiling = Math.max(STATS_SPLIT_MIN, available - STATS_SPLIT_MIN)
+            // 下方余量：body 里除去列表还剩多少，列表可以把它征用。
+            const below = Math.max(0, available - list.offsetHeight)
+            // 自适应卡片（body 高度 == 列表高度）时余量是 0，直接算出上限就等于
+            // 下限——向下拖会被立刻夹住。此时给一个「撑高卡片」的额度，让拖动
+            // 表现为把列表拉大、卡片跟着长高。onStart 已把卡片高度固化，所以
+            // 撑大是真实发生的高度变化，行不会被压扁。
+            const grow = below > 0 ? 0 : Math.max(160, Math.round(list.scrollHeight))
+            const ceiling = Math.max(Math.round(list.scrollHeight) + below + grow, list.offsetHeight, STATS_SPLIT_MIN)
             splitDrag.current = {
               startY: event.clientY,
               startHeight: list.offsetHeight,
-              minHeight: Math.max(STATS_SPLIT_MIN, Math.min(natural, ceiling)),
+              minHeight: Math.max(1, natural),
               maxHeight: ceiling,
               onChange, onCommit,
             }
