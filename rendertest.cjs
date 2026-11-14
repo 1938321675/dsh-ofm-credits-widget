@@ -33,6 +33,8 @@ global.document = {
   visibilityState: 'visible',
   addEventListener() {},
   removeEventListener() {},
+  // 拖动开始时组件会量一次卡片高度，桩件返回 null 表示"量不到"。
+  querySelector() { return null },
 }
 
 // ── 状态化 React 桩 ───────────────────────────────────────────────────────
@@ -386,8 +388,16 @@ check('收起时不显示配置面板',
     && n.props.style !== undefined && n.props.style.padding === '4px 0 6px')
   check('没拖过时 body 限制高度', bodyOf(list)?.props.style?.maxHeight, 320)
   check('拖过之后 body 放开高度限制', bodyOf(sized)?.props.style?.maxHeight, undefined)
-  // 保留自身滚动：卡片可能是固定高度的，改成 visible 会让下半区溢出卡片被裁掉。
-  check('拖过之后 body 仍自己滚动', bodyOf(sized)?.props.style?.overflowY, 'auto')
+  // 拖过之后 body 变成纵向 flex 容器：上下两块在里面分配空间，
+  // 这样「拖矮上面」才会让下面变大，横线也才会跟着手走。
+  check('拖过之后 body 是纵向 flex', bodyOf(sized)?.props.style?.display, 'flex')
+  check('拖过之后 body 纵向排列', bodyOf(sized)?.props.style?.flexDirection, 'column')
+  check('没拖过时 body 不是 flex 容器', bodyOf(list)?.props.style?.display, undefined)
+
+  // 下半区：拖过之后吃满剩余高度（flex: 1），没拖过时随内容。
+  const wbOf = tree => flatten(tree).find(n => n.props !== undefined && n.props['data-ofm-credit-watch-wb'] === 'section')
+  check('拖过之后 WorkBuddy 分区吃剩余高度', wbOf(sized)?.props.style?.flex, '1 1 auto')
+  check('没拖过时 WorkBuddy 分区随内容', wbOf(list)?.props.style?.flex, undefined)
   void panelOf
 
   // 统计视图与设置面板里，上半区不是列表，分隔条不出现。
@@ -431,11 +441,25 @@ check('收起时不显示配置面板',
   handlers.pointermove({ clientY: 99999, preventDefault() {} })
   check('拖动高度被夹进可视区', hooks[IDX.mainSplit], 400 - t.STATS_SPLIT_MIN)
 
+  // 双向都要跟手：同一轮拖动里往回拖，高度必须立刻变小。
+  // 基准是按下那一刻的静态值，所以任何位置都能落在 (startHeight + 位移) 上，
+  // 不会出现「只能变大、拖不回去」。
+  handlers.pointermove({ clientY: 60, preventDefault() {} })
+  check('往回拖会变小', hooks[IDX.mainSplit], 120 + (60 - 100))
+  handlers.pointermove({ clientY: 140, preventDefault() {} })
+  check('再往回拖又变大', hooks[IDX.mainSplit], 120 + (140 - 100))
+
+  // 上下两端都夹住：拉到顶不超过可用高度减一个最小块，拉到底停在最小高度。
+  handlers.pointermove({ clientY: 90000, preventDefault() {} })
+  check('拉到顶停在上限', hooks[IDX.mainSplit], 400 - t.STATS_SPLIT_MIN)
+  handlers.pointermove({ clientY: -90000, preventDefault() {} })
+  check('拉到底停在最小高度', hooks[IDX.mainSplit], t.STATS_SPLIT_MIN)
+
   // 松手：监听器要摘掉，且高度落盘。
   handlers.pointerup({})
   check('松手后摘掉 pointermove', handlers.pointermove, undefined)
   check('松手后摘掉 pointerup', handlers.pointerup, undefined)
-  check('松手后高度已落盘', global.window.localStorage.getItem(t.MAIN_SPLIT_KEY), String(400 - t.STATS_SPLIT_MIN))
+  check('松手后高度已落盘', global.window.localStorage.getItem(t.MAIN_SPLIT_KEY), String(t.STATS_SPLIT_MIN))
 
   global.window.localStorage.setItem(t.MAIN_SPLIT_KEY, '')
 }

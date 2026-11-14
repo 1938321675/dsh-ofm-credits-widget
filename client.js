@@ -1459,7 +1459,7 @@ window.__ModuleLoader__.load({
        * 换掉，捕获就失效、后续事件全丢，表现就是「光标变了但拖不动」。挂在
        * window 上则与元素存亡无关，指针拖出卡片范围也不会中断。
        */
-      function makeSplitHandlers({ listSelector, onChange, onCommit, onReset }) {
+      function makeSplitHandlers({ listSelector, onStart, onChange, onCommit, onReset }) {
         const stop = () => {
           const state = splitDrag.current
           splitDrag.current = null
@@ -1479,13 +1479,16 @@ window.__ModuleLoader__.load({
             if (event.button !== undefined && event.button !== 0) return
             const list = event.currentTarget?.parentElement?.querySelector?.(listSelector)
             if (list === null || list === undefined) return
-            // 上限取卡片内容区的可视高度：两块加起来不用超过一屏，
-            // 否则往下拖时列表长到看不见边，反而不知道拖到哪了。
-            const viewport = list.parentElement?.clientHeight || 320
+            // 上限取「卡片可用高度减一个最小块」：拖到顶就是列表占满、下半区还剩最小块。
+            // 用 body 的 clientHeight 而不是列表自己的高度——用后者的话拖动量
+            // 一大就到底，往下拖会立刻没有余量。
+            const body = list.parentElement
+            const available = body?.clientHeight || 320
+            if (typeof onStart === 'function') onStart(available)
             splitDrag.current = {
               startY: event.clientY,
               startHeight: list.offsetHeight,
-              maxHeight: Math.max(STATS_SPLIT_MIN, viewport - STATS_SPLIT_MIN),
+              maxHeight: Math.max(STATS_SPLIT_MIN, available - STATS_SPLIT_MIN),
               onChange, onCommit,
             }
             window.addEventListener('pointermove', move)
@@ -1519,6 +1522,22 @@ window.__ModuleLoader__.load({
       // 主界面：渠道列表高度。拖动期间只更新界面，松手才落盘。
       const mainSplitHandlers = makeSplitHandlers({
         listSelector: '[data-main-list]',
+        // 拖动前把卡片高度固化下来：卡片是 height: auto 时，纵向 flex 没有可分配
+        // 的空间，「拖矮上面」只是把下面的内容往上挪，横线不会跟着手走。
+        // 取当前实测高度，视觉上没有跳变。
+        onStart: () => {
+          if (size.height !== null) return
+          // 沙盒 iframe / 测试桩里 document 可能不支持 querySelector，别让拖动因此断掉。
+          const panel = typeof document?.querySelector === 'function'
+            ? document.querySelector('[data-ofm-credit-watch="panel"]')
+            : null
+          const measured = panel === null || panel === undefined ? 0 : Math.round(panel.offsetHeight)
+          if (measured <= 0) return
+          persistSize(
+            { width: size.width, height: measured },
+            { left: leftOf(pos, window.innerWidth, size.width), top: pos.top },
+          )
+        },
         onChange: setMainSplit,
         onCommit: () => setMainSplit(current => {
           if (current !== null) saveMainSplit(current)
@@ -1643,18 +1662,24 @@ window.__ModuleLoader__.load({
         // 但**不能**改成 overflowY: visible——卡片拉过右下角时 panel 是固定高度
         // 且 overflow: hidden，visible 会让下半区溢出到卡片外被裁掉，表现就是
         // WorkBuddy 分区整个消失。始终保留自身滚动，两种情况都能看到全部内容。
-        body: size.height === null || collapsed
-          ? (mainSplit === null
+        // 三种情形：
+        //   1. 默认（没拖过分隔条）：整体滚动，最高 320；
+        //   2. 卡片被拉过右下角：body 吃满剩余空间并滚动；
+        //   3. 拖过分隔条：body 变成纵向 flex 容器，列表固定高度、下半区 flex:1
+        //      吃掉剩余——只有这样才能"拖矮上面、下面变大"，横线才会真的跟着走。
+        //      此时 body 自己不滚动，由两块各自滚。
+        body: mainSplit !== null && !collapsed
+          ? { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column', padding: '4px 0 6px' }
+          : size.height === null || collapsed
             ? { maxHeight: 320, overflowY: 'auto', padding: '4px 0 6px' }
-            : { overflowY: 'auto', padding: '4px 0 6px' })
-          : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0 6px' },
+            : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0 6px' },
         // 主界面渠道列表：没拖过横条时随内容长；拖过之后固定高度并自己滚动。
-        mainListAuto: { overflowY: 'auto' },
-        // 固定高度时靠自身滚动；flexShrink 0 防止被下面的分区挤压。
-        mainList: { overflowY: 'auto', flexShrink: 0 },
+        // flexShrink: 0 保证拖动时是它定高、下半区让位，而不是反过来被压缩。
+        mainListAuto: {},
+        mainList: { overflowY: 'auto', flexShrink: 0, minHeight: 0 },
         // 主界面分隔条：与统计界面那条同一手感，抓取区 7px。
         mainSplitter: {
-          height: 7, margin: '1px 0', cursor: 'row-resize', touchAction: 'none',
+          height: 7, margin: '1px 0', cursor: 'row-resize', touchAction: 'none', flexShrink: 0,
           borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))',
           background: 'transparent',
         },
@@ -1782,7 +1807,9 @@ window.__ModuleLoader__.load({
         // ── WorkBuddy 分区 ──
         // 与渠道行同一套视觉语言，多一列当前余额。
         // 上边框由分隔条负责画：这里再画一条就成了并排的两条线。
-        wbWrap: {},
+        // 拖过分隔条之后由它吃满剩余高度（flex: 1），横线才真的会跟着手走；
+        // 没拖过时随内容，与原来一致。
+        wbWrap: mainSplit === null ? {} : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' },
         wbHead: {
           display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
           cursor: 'pointer', fontSize: 11.5, fontWeight: 600,
