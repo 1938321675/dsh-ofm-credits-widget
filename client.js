@@ -1522,22 +1522,6 @@ window.__ModuleLoader__.load({
       // 主界面：渠道列表高度。拖动期间只更新界面，松手才落盘。
       const mainSplitHandlers = makeSplitHandlers({
         listSelector: '[data-main-list]',
-        // 拖动前把卡片高度固化下来：卡片是 height: auto 时，纵向 flex 没有可分配
-        // 的空间，「拖矮上面」只是把下面的内容往上挪，横线不会跟着手走。
-        // 取当前实测高度，视觉上没有跳变。
-        onStart: () => {
-          if (size.height !== null) return
-          // 沙盒 iframe / 测试桩里 document 可能不支持 querySelector，别让拖动因此断掉。
-          const panel = typeof document?.querySelector === 'function'
-            ? document.querySelector('[data-ofm-credit-watch="panel"]')
-            : null
-          const measured = panel === null || panel === undefined ? 0 : Math.round(panel.offsetHeight)
-          if (measured <= 0) return
-          persistSize(
-            { width: size.width, height: measured },
-            { left: leftOf(pos, window.innerWidth, size.width), top: pos.top },
-          )
-        },
         onChange: setMainSplit,
         onCommit: () => setMainSplit(current => {
           if (current !== null) saveMainSplit(current)
@@ -1668,15 +1652,21 @@ window.__ModuleLoader__.load({
         //   3. 拖过分隔条：body 变成纵向 flex 容器，列表固定高度、下半区 flex:1
         //      吃掉剩余——只有这样才能"拖矮上面、下面变大"，横线才会真的跟着走。
         //      此时 body 自己不滚动，由两块各自滚。
-        body: mainSplit !== null && !collapsed
-          ? { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column', padding: '4px 0 6px' }
-          : size.height === null || collapsed
+        // 三种情形：
+        //   1. 默认（没拖过分隔条）：整体滚动，最高 320；
+        //   2. 卡片被拉过右下角：body 吃满剩余空间并滚动；
+        //   3. 拖过分隔条：去掉 320 上限交给逐块滚动——列表有 maxHeight、
+        //      WorkBuddy 分区有 maxHeight，谁超了谁自己滚。
+        //      这样渠道少时两块都按内容高，底部不会留一大片空白。
+        body: size.height === null || collapsed
+          ? (mainSplit === null
             ? { maxHeight: 320, overflowY: 'auto', padding: '4px 0 6px' }
-            : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0 6px' },
-        // 主界面渠道列表：没拖过横条时随内容长；拖过之后固定高度并自己滚动。
-        // flexShrink: 0 保证拖动时是它定高、下半区让位，而不是反过来被压缩。
+            : { overflowY: 'auto', padding: '4px 0 6px' })
+          : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0 6px' },
+        // 主界面渠道列表：没拖过横条时随内容长；拖过之后给一个「最大高度」——
+        // 渠道少时仍按内容撑开（底部不留空白），多到超过时自己滚动。
         mainListAuto: {},
-        mainList: { overflowY: 'auto', flexShrink: 0, minHeight: 0 },
+        mainList: { overflowY: 'auto' },
         // 主界面分隔条：与统计界面那条同一手感，抓取区 7px。
         mainSplitter: {
           height: 7, margin: '1px 0', cursor: 'row-resize', touchAction: 'none', flexShrink: 0,
@@ -1809,7 +1799,7 @@ window.__ModuleLoader__.load({
         // 上边框由分隔条负责画：这里再画一条就成了并排的两条线。
         // 拖过分隔条之后由它吃满剩余高度（flex: 1），横线才真的会跟着手走；
         // 没拖过时随内容，与原来一致。
-        wbWrap: mainSplit === null ? {} : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' },
+        wbWrap: {},
         wbHead: {
           display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
           cursor: 'pointer', fontSize: 11.5, fontWeight: 600,
@@ -2102,7 +2092,10 @@ window.__ModuleLoader__.load({
           view === 'stats' ? statsSection
           // 列表视图：渠道列表包进可调高的容器，中间的横条拖它改高度。
           : h('div', {
-            style: mainSplit === null ? style.mainListAuto : { ...style.mainList, height: mainSplit },
+            // 拖过分隔条后给的是「最大高度」而不是固定高度：
+            // 渠道少时列表按内容撑开，下面紧跟 WorkBuddy 分区，不留空白；
+            // 渠道多到超过这个高度时才限高并自己滚动。
+            style: mainSplit === null ? style.mainListAuto : { ...style.mainList, maxHeight: mainSplit },
             'data-main-list': 'true',
           },
           rows.length === 0

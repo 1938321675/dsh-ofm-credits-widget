@@ -379,26 +379,22 @@ check('收起时不显示配置面板',
   check('没拖过时渠道列表没有固定高度', mainListOf(list)?.props.style?.height, undefined)
 
   const sized = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.mainSplit]: 180 })
-  check('拖过之后渠道列表带固定高度', mainListOf(sized)?.props.style?.height, 180)
+  // 存的是「最大高度」而不是固定高度：渠道只有 4 个时列表按内容撑开，
+  // 下方紧跟 WorkBuddy 分区，不会在中间留出一大片空白。
+  check('拖过之后渠道列表带最大高度', mainListOf(sized)?.props.style?.maxHeight, 180)
+  check('拖过之后渠道列表不固定高度', mainListOf(sized)?.props.style?.height, undefined)
+  check('拖过之后渠道列表超出时自己滚', mainListOf(sized)?.props.style?.overflowY, 'auto')
 
-  // body 在拖过分隔条后必须放开高度上限与滚动，否则列表只是「里面滚了」，
-  // 高度没变，拖动看起来毫无反应。
-  const panelOf = tree => flatten(tree).find(n => n.props !== undefined && n.props['data-ofm-credit-watch'] === 'panel')
+  // body 在拖过分隔条后去掉 320 上限，改为逐块滚动；不再做上下 flex 分配。
   const bodyOf = tree => flatten(tree).find(n => n.props !== undefined
     && n.props.style !== undefined && n.props.style.padding === '4px 0 6px')
   check('没拖过时 body 限制高度', bodyOf(list)?.props.style?.maxHeight, 320)
   check('拖过之后 body 放开高度限制', bodyOf(sized)?.props.style?.maxHeight, undefined)
-  // 拖过之后 body 变成纵向 flex 容器：上下两块在里面分配空间，
-  // 这样「拖矮上面」才会让下面变大，横线也才会跟着手走。
-  check('拖过之后 body 是纵向 flex', bodyOf(sized)?.props.style?.display, 'flex')
-  check('拖过之后 body 纵向排列', bodyOf(sized)?.props.style?.flexDirection, 'column')
-  check('没拖过时 body 不是 flex 容器', bodyOf(list)?.props.style?.display, undefined)
+  check('拖过之后 body 不是 flex 分配容器', bodyOf(sized)?.props.style?.display, undefined)
 
-  // 下半区：拖过之后吃满剩余高度（flex: 1），没拖过时随内容。
+  // 下半区随内容，不抢剩余空间。
   const wbOf = tree => flatten(tree).find(n => n.props !== undefined && n.props['data-ofm-credit-watch-wb'] === 'section')
-  check('拖过之后 WorkBuddy 分区吃剩余高度', wbOf(sized)?.props.style?.flex, '1 1 auto')
-  check('没拖过时 WorkBuddy 分区随内容', wbOf(list)?.props.style?.flex, undefined)
-  void panelOf
+  check('拖过之后 WorkBuddy 分区仍随内容', wbOf(sized)?.props.style?.flex, undefined)
 
   // 统计视图与设置面板里，上半区不是列表，分隔条不出现。
   check('统计视图没有主界面分隔条',

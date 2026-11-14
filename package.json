@@ -1,6 +1,6 @@
 {
   "name": "dsh-ofm-credit-watch",
-  "version": "1.8.3",
+  "version": "1.8.4",
   "private": true,
   "type": "module",
   "description": "悬浮监控 Our Free Model（OFM）EAC router 各渠道的剩余积分：每分钟刷新一次，同时统计 WorkBuddy 每个账号的今日积分消耗，并提供按日期查看的 token 用量统计界面；显示当前剩余、本分钟消耗与当日累计消耗，按最近有消耗的渠道置顶，窗口可自由拖动；鼠标悬停渠道名可看各积分包构成与过期时间，按单位（积分/美元/token/百分比）分级告警；可勾选隐藏用不上的渠道来收窄窗口。",
