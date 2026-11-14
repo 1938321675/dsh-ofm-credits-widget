@@ -75,6 +75,10 @@ window.__ModuleLoader__.load({
     const VIEW_KEY = 'ofm-credit-watch.view'
     /** 统计界面一屏放几天。 */
     const STATS_DAYS = 7
+    /** 统计界面「渠道明细」区高度持久化键；null 表示随内容自适应。 */
+    const STATS_SPLIT_KEY = 'ofm-credit-watch.statsSplit'
+    /** 明细区最少留几行的高度，再小就没有滚动条的意义了。 */
+    const STATS_SPLIT_MIN = 48
     /** 「都在安静」的判定窗口：超过它就当作不活跃。 */
     const IDLE_WINDOW_MS = 5 * 60_000
     /** 卡片默认宽度：位置换算、拖动夹取、手柄复位共用一个常量。 */
@@ -240,8 +244,9 @@ window.__ModuleLoader__.load({
         statsPrev: '前一天',
         statsNext: '后一天',
         statsNoData: '暂无数据',
-        tokenToday: '今日 token',
+        tokenToday: 'token',
         wbAccumulated: '累计积分',
+        statsSplitHint: '上下拖动改变明细区高度，双击复位',
         wbToday: '今日',
         wbTotal: '累计',
         wbUnavailable: '未连接 WorkBuddy',
@@ -309,8 +314,9 @@ window.__ModuleLoader__.load({
         statsPrev: 'Previous day',
         statsNext: 'Next day',
         statsNoData: 'no data',
-        tokenToday: 'tokens today',
+        tokenToday: 'tokens',
         wbAccumulated: 'total credits',
+        statsSplitHint: 'Drag up or down to resize, double-click to reset',
         wbToday: 'today',
         wbTotal: 'total',
         wbUnavailable: 'WorkBuddy not connected',
@@ -540,6 +546,31 @@ window.__ModuleLoader__.load({
     /** 写尺寸。 */
     function saveSize(size) {
       try { window.localStorage?.setItem(SIZE_KEY, JSON.stringify(size)) } catch { /* 存储不可用 */ }
+    }
+
+    /**
+     * 统计界面明细区的高度。
+     *
+     * `null` 表示随内容自适应——与卡片高度本身同一套语义：没手动拖过就
+     * 让内容决定，拖过之后才固定下来。
+     */
+    function loadStatsSplit() {
+      try {
+        const raw = Number(window.localStorage?.getItem(STATS_SPLIT_KEY))
+        if (Number.isFinite(raw) && raw >= STATS_SPLIT_MIN) return Math.round(raw)
+      } catch { /* 存储不可用 */ }
+      return null
+    }
+
+    function saveStatsSplit(height) {
+      try { window.localStorage?.setItem(STATS_SPLIT_KEY, String(height)) } catch { /* 存储不可用 */ }
+    }
+
+    /** 把明细区高度夹进可用范围；上限由调用方按卡片实际高度给。 */
+    function clampStatsSplit(height, maxHeight) {
+      if (!Number.isFinite(height)) return null
+      const max = Math.max(STATS_SPLIT_MIN, Math.round(maxHeight))
+      return Math.round(Math.min(Math.max(STATS_SPLIT_MIN, height), max))
     }
 
     /**
@@ -986,6 +1017,8 @@ window.__ModuleLoader__.load({
       const [usage, setUsage] = useState({ available: true, days: [] })
       // 统计界面当前选中的日期；空串表示"还没选，跟最新一天走"。
       const [usageDate, setUsageDate] = useState('')
+      // 统计界面「渠道明细」区的高度：null 表示随内容自适应，拖过分隔条后固定。
+      const [statsSplit, setStatsSplit] = useState(loadStatsSplit)
 
       // 上一轮读数与串行保护：轮询和手动刷新可能重叠，只允许最新一轮落库。
       const previous = useRef(null)
@@ -1386,6 +1419,51 @@ window.__ModuleLoader__.load({
         },
       })
 
+      // ── 统计界面：分隔条拖动 ────────────────────────────────────────────
+      // 与卡片八向缩放同一套 pointer 捕获：拖出卡片范围也不中断。
+      // 存的是明细区高度；上限取「卡片内容区还要给下半区留位置」之后的值。
+      const splitDrag = useRef(null)
+      const splitHandlers = {
+        onPointerDown: event => {
+          if (event.button !== undefined && event.button !== 0) return
+          const target = event.currentTarget
+          const list = target?.parentElement?.querySelector?.('[data-stats-list]')
+          if (list === null || list === undefined) return
+          splitDrag.current = {
+            startY: event.clientY,
+            startHeight: list.offsetHeight,
+            maxHeight: Math.max(STATS_SPLIT_MIN, list.offsetHeight + (list.parentElement?.offsetHeight ?? 0) - STATS_SPLIT_MIN),
+          }
+          try { target.setPointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
+          event.preventDefault()
+          event.stopPropagation()
+        },
+        onPointerMove: event => {
+          const state = splitDrag.current
+          if (state === null) return
+          const next = clampStatsSplit(state.startHeight + (event.clientY - state.startY), state.maxHeight)
+          setStatsSplit(next)
+          event.preventDefault()
+        },
+        onPointerUp: event => {
+          if (splitDrag.current === null) return
+          splitDrag.current = null
+          try { event.currentTarget?.releasePointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
+          // 拖动期间只更新界面，松手才落盘：拖动每帧都写 localStorage 没必要。
+          setStatsSplit(current => {
+            if (current !== null) saveStatsSplit(current)
+            return current
+          })
+        },
+        // 双击复位：回到随内容自适应。
+        onDoubleClick: event => {
+          event.preventDefault()
+          event.stopPropagation()
+          setStatsSplit(null)
+          try { window.localStorage?.removeItem(STATS_SPLIT_KEY) } catch { /* 存储不可用 */ }
+        },
+      }
+
       // ── 排序与汇总 ───────────────────────────────────────────────────────
       // 只有被勾选显示的渠道才参与列表渲染与排序；数据仍然全部采集，
       // 因此勾回来立刻有数字。
@@ -1501,6 +1579,8 @@ window.__ModuleLoader__.load({
         // （1352 余额 vs −1.0 消耗）挤在一列会读成一串。
         row: {
           display: 'grid',
+          // 色条 / 名称 / 今日积分 / 余额（余额下方是今日 token）。
+          // 与 WorkBuddy 账号行的网格一致，两块的「今日」「余额」列上下对齐。
           gridTemplateColumns: '3px 1fr 52px 64px',
           alignItems: 'center',
           gap: 8,
@@ -1599,10 +1679,19 @@ window.__ModuleLoader__.load({
         statsHint: {
           padding: '6px 10px 8px', color: 'var(--dsw-alias-label-secondary, #888)', fontSize: 10.5,
         },
+        // 明细区：没拖过分隔条时随内容长；拖过之后固定高度并自己滚动。
+        statsListAuto: { overflowY: 'auto' },
+        statsList: { overflowY: 'auto' },
+        // 分隔条：平时就是一条边线，鼠标贴上去才透出一点提示色。
+        // 上下各留 3px 的可点区域，纯 1px 的线很难抓。
+        statsSplitter: {
+          height: 7, margin: '1px 0', cursor: 'row-resize', touchAction: 'none',
+          borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))',
+          background: 'transparent',
+        },
         statsWbTotal: {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
-          marginTop: 4, padding: '6px 10px 4px',
-          borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))',
+          padding: '4px 10px 4px',
           fontSize: 10.5, color: 'var(--dsw-alias-label-secondary, #888)',
         },
         statsWbAmount: { fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: 'var(--dsw-alias-label-primary, inherit)' },
@@ -1619,15 +1708,16 @@ window.__ModuleLoader__.load({
           color: 'var(--dsw-alias-label-secondary, #888)', fontVariantNumeric: 'tabular-nums',
           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         },
-        // 三列：账号 / 今日 / 余额。累计消耗已移到统计界面，主界面只留当天。
-        // 列头与账号行共用同一套网格，改列宽只改这一处。
+        // 色条 / 账号 / 今日积分 / 余额。网格与渠道行完全一致，两块的
+        // 「今日」「余额」列在同一竖线上；左侧色条位置留给对齐用的空条。
+        // 累计消耗已移到统计界面，主界面只留当天。
         wbRow: {
-          display: 'grid', gridTemplateColumns: '1fr 52px 60px',
+          display: 'grid', gridTemplateColumns: '3px 1fr 52px 64px',
           alignItems: 'center', gap: 8, padding: '4px 10px',
         },
-        // 列头：比账号行再小半号、更淡一档，读完就该忽略掉。
+        // 列头：与账号行同一套网格，比它再小半号、更淡一档，读完就该忽略掉。
         wbColHead: {
-          display: 'grid', gridTemplateColumns: '1fr 52px 60px',
+          display: 'grid', gridTemplateColumns: '3px 1fr 52px 64px',
           alignItems: 'center', gap: 8, padding: '1px 10px 3px',
           fontSize: 10, color: 'var(--dsw-alias-label-secondary, #888)',
         },
@@ -1718,18 +1808,33 @@ window.__ModuleLoader__.load({
               h('div', { style: style.statsTotalLabel }, t('statsWb')),
               h('div', { style: style.statsTotalValue, 'data-wb-token-total': 'true' }, formatTokens(wbTotal)))),
 
-          // 渠道明细：当天有调用的渠道逐行列出。
-          channels.length === 0
-            ? h('div', { style: style.statsHint }, t('statsEmpty'))
-            : channels.map(item => h('div', {
-              key: item.channel.id, style: style.statsRow, 'data-stats-channel': item.channel.id,
-            },
-              h('span', { style: { ...style.stripe, background: item.channel.accent } }),
-              h('span', { style: style.statsNameCell },
-                h('span', { style: style.statsName }, item.channel.name),
-                h('span', { style: style.meta }, fill(t('statsCalls'), { count: item.row.calls || 0 }))),
-              h('span', { style: style.statsAmount }, formatTokens(totalTokens(item.row))),
-            )),
+          // 渠道明细：当天有调用的渠道逐行列出。高度可调，超出部分自己滚动——
+          // 渠道多的日子里，这一区是唯一会变长的地方。
+          h('div', {
+            style: statsSplit === null ? style.statsListAuto : { ...style.statsList, height: statsSplit },
+            'data-stats-list': 'true',
+          },
+            channels.length === 0
+              ? h('div', { style: style.statsHint }, t('statsEmpty'))
+              : channels.map(item => h('div', {
+                key: item.channel.id, style: style.statsRow, 'data-stats-channel': item.channel.id,
+              },
+                h('span', { style: { ...style.stripe, background: item.channel.accent } }),
+                h('span', { style: style.statsNameCell },
+                  h('span', { style: style.statsName }, item.channel.name),
+                  h('span', { style: style.meta }, fill(t('statsCalls'), { count: item.row.calls || 0 }))),
+                h('span', { style: style.statsAmount }, formatTokens(totalTokens(item.row))),
+              ))),
+
+          // 分隔条：上下拖动改变明细区高度，双击复位成随内容自适应。
+          // 平时只是一条边线，鼠标贴上去才透出提示色——与卡片边缘同一手感。
+          h('div', {
+            key: '__split',
+            style: style.statsSplitter,
+            'data-stats-splitter': 'true',
+            title: t('statsSplitHint'),
+            ...splitHandlers,
+          }),
 
           // WorkBuddy 累计积分：所有账号合并，放在这里是因为主界面只需要当天。
           wbAccumulatedTotal === null ? null : h('div', { style: style.statsWbTotal },
@@ -1763,19 +1868,22 @@ window.__ModuleLoader__.load({
             h('span', { style: style.wbSum },
               wbTodaySum === null ? '—' : `${t('wbToday')} −${formatAmount(wbTodaySum, 'credits')}`,
               // 今日 token：所有账号合起来一个数，与 cost-meter 面板口径一致。
-              wbTokensToday === null ? '' : ` · ${formatTokens(wbTokensToday)} tok`),
+              wbTokensToday === null ? '' : ` · token ${formatTokens(wbTokensToday)}`),
             h('span', { style: style.meta }, wbOpen ? '▾' : '▸')),
           wbRows.length === 0
             ? h('div', { style: style.wbEmpty }, t('wbNoAccounts'))
             : !wbOpen ? null : [
               // 列头：三列数字长得一模一样（都是 −数字），不标出来就得靠猜。
               h('div', { key: '__colhead', style: style.wbColHead, 'data-wb-colhead': 'true' },
+                h('span', null, null),
                 h('span', null, t('wbColAccount')),
                 h('span', { style: style.wbColHeadCell }, t('wbToday')),
                 h('span', { style: style.wbColHeadCell }, t('wbColBalance'))),
               ...wbRows.map(row => {
               const usedToday = wbLedger.daily[row.key]
               return h('div', { key: row.key, style: style.wbRow, 'data-wb-account': row.key },
+                // 与渠道行同宽的空色条：让「今日」「余额」两列和上面严格对齐。
+                h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
                 h('span', { style: style.wbNameCell },
                   h('span', { style: style.wbName, title: row.name }, row.name),
                   h('span', { style: style.meta },
@@ -1899,11 +2007,13 @@ window.__ModuleLoader__.load({
               // 全部被隐藏：给出回程路径，而不是留一片空白让人以为坏了。
               ? h('div', { style: style.empty }, t('allHidden'))
               : (ordered.map(row => {
-              const spend = delta[row.id]
               const spentAt = lastSpent[row.id]
               const active = Number.isFinite(spentAt) && (now - spentAt) <= IDLE_WINDOW_MS
               const todayUsed = today[row.id]
               const unit = row.unit ?? 'credits'
+              // 本渠道今日的 token 用量；cost-meter 没装或当天没调用就是 null。
+              const channelUsage = latestUsage?.byChannel?.[row.id]
+              const channelTokens = channelUsage === undefined ? null : totalTokens(channelUsage)
               // 副标题优先报问题，其次报账号数与最近消耗时间——一行放不下三件事。
               const status = row.ok === false
                 ? t('failed')
@@ -1924,14 +2034,16 @@ window.__ModuleLoader__.load({
                 h('span', { style: style.nameCell },
                   h('span', { style: { ...style.name, opacity: row.ok === false ? 0.6 : 1 } }, row.name),
                   status === '' ? null : h('span', { style: style.meta }, status)),
+                // 今日积分消耗：与下方 WorkBuddy 账号的「今日」列对齐，
+                // 一行一个口径——"今天花了多少积分"。
                 h('span', {
                   style: {
                     ...style.spendCell,
-                    color: Number.isFinite(spend) && spend > 0
+                    color: Number.isFinite(todayUsed) && todayUsed > 0
                       ? 'var(--dsw-alias-state-warn-primary, #d97706)'
                       : 'var(--dsw-alias-label-secondary, #888)',
                   },
-                }, Number.isFinite(spend) && spend > 0 ? `−${formatAmount(spend, unit)}` : '·'),
+                }, Number.isFinite(todayUsed) && todayUsed > 0 ? `−${formatAmount(todayUsed, unit)}` : '·'),
                 h('span', { style: style.numbers, title: tooltipOf(row) },
                   h('span', {
                     style: {
@@ -1940,9 +2052,11 @@ window.__ModuleLoader__.load({
                       opacity: Number.isFinite(row.total) ? 1 : 0.45,
                     },
                   }, formatAmount(row.total, unit)),
-                  Number.isFinite(todayUsed) && todayUsed > 0
-                    ? h('span', { style: style.today }, `${t('today')} −${formatAmount(todayUsed, unit)}`)
-                    : null))
+                  // 余额下方换成本渠道今日的 token 用量：积分与 token 是两套
+                  // 口径，分开读比挤在一行里清楚。
+                  channelTokens === null
+                    ? null
+                    : h('span', { style: style.today }, `${t('tokenToday')} ${formatTokens(channelTokens)}`)))
             }))),
         // WorkBuddy 分区放在渠道列表之后：它是另一套上游，视觉上与上面隔开，
         // 但共用同一个滚动区，不额外占用卡片高度。
@@ -2036,6 +2150,7 @@ window.__ModuleLoader__.load({
       normalizeHidden, toggleHidden, CHANNELS, DICT, HIDDEN_KEY, WB_OPEN_KEY,
       mapLimit, shouldPollChannel, failureRow, sumSpend, wbLedgerKey,
       totalTokens, formatTokens, fetchUsage, indexOfDate, USAGE_URL, VIEW_KEY, STATS_DAYS,
+      loadStatsSplit, saveStatsSplit, clampStatsSplit, STATS_SPLIT_KEY, STATS_SPLIT_MIN,
       fetchWorkBuddyRegion, normalizeWorkBuddy, MAX_CONCURRENCY, HIDDEN_POLL_MS, STALE_ROW_MS, WB_POLL_MS,
       formatAmount, unitOf, toneOf, expireOf, tooltipOf, normalizeTotals,
       accumulateLocal, loadLocalDaily, loadPos, leftOf, localDate, round2,

@@ -112,6 +112,14 @@ function render(overrides) {
   return element.type(element.props)
 }
 
+/** 收集整棵树里所有字符串节点的文本。 */
+function allText(node, out = []) {
+  if (typeof node === 'string') { out.push(node); return out }
+  if (node === null || typeof node !== 'object') return out
+  for (const child of node.children || []) allText(child, out)
+  return out
+}
+
 /** 数出渠道列表行（列表行的样式带 gridTemplateColumns）。 */
 function countRows(tree) {
   return flatten(tree).filter(node =>
@@ -149,7 +157,7 @@ const IDX = {
   // WorkBuddy 分区：接在 size 之后，前十五个下标不受影响。
   wbRows: 15, wbLedger: 16, wbConnected: 17, wbOpen: 18, wbLoading: 19,
   // 视图与 token 用量：接在 WorkBuddy 之后。
-  view: 20, usage: 21, usageDate: 22,
+  view: 20, usage: 21, usageDate: 22, statsSplit: 23,
 }
 
 /** WorkBuddy 分区节点。 */
@@ -238,7 +246,9 @@ check('收起时不显示配置面板',
   // 三列数字长得一样（都是 −数字），没有列头就得靠猜。
   const head = flatten(expanded).find(node => node.props !== undefined && node.props['data-wb-colhead'] === 'true')
   check('展开后有列头', head !== undefined, true)
-  check('列头三格（累计已移到统计界面）', head.children.length, 3)
+  // 四格：空色条占位 + 账号 / 今日 / 余额。首格是透明的对齐占位，
+  // 让「今日」「余额」与上方渠道行的同名列落在同一竖线上。
+  check('列头四格（含对齐占位）', head.children.length, 4)
 
   // 记过账的账号显示 −0，没记过的显示 ·：两者含义不同。
   const zero = render({
@@ -294,6 +304,36 @@ check('收起时不显示配置面板',
 
   const stats = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats', [IDX.usage]: sampleUsage })
   check('统计视图渲染出统计块', statsOf(stats)?.props['data-ofm-credit-watch-stats'], 'section')
+  // 渠道行在统计视图之外才显示今日 token 小字。
+  const withUsage = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.usage]: {
+      available: true,
+      days: [{ date: '2026-11-11', ofm: { input: 1, output: 1, cacheRead: 1, calls: 1 }, workbuddy: { input: 1, output: 1, cacheRead: 1, calls: 1 }, byChannel: { qoder: { input: 100, output: 0, cacheRead: 900, calls: 2 } } }],
+    },
+  })
+  const usageTexts = allText(withUsage).join(' ')
+  // 100 + 900 + 0 = 1000，走 kilo 原样显示（一万以下不缩写）。
+  check('渠道行显示今日 token', usageTexts.includes('token 1000'), true)
+
+  const noUsage = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.usage]: { available: false, days: [] } })
+  const noUsageTexts = allText(noUsage).join(' ')
+  check('没有用量数据时不显示 token 小字', noUsageTexts.includes('token'), false)
+
+  // 分隔条：拖它改明细区高度。它在统计视图里始终存在，与有没有渠道无关。
+  const splitter = flatten(stats).find(n => n.props !== undefined && n.props['data-stats-splitter'] === 'true')
+  check('统计视图有可拖动分隔条', splitter !== undefined, true)
+  check('分隔条用上下拖动光标', splitter?.props.style?.cursor, 'row-resize')
+
+  // 明细区容器：没拖过是自适应，拖过之后带固定高度。
+  const autoList = flatten(stats).find(n => n.props !== undefined && n.props['data-stats-list'] === 'true')
+  check('没拖过时明细区没有固定高度', autoList?.props.style?.height, undefined)
+  const sizedList = flatten(render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.view]: 'stats', [IDX.usage]: sampleUsage, [IDX.statsSplit]: 160,
+  })).find(n => n.props !== undefined && n.props['data-stats-list'] === 'true')
+  check('拖过之后明细区带固定高度', sizedList?.props.style?.height, 160)
+
   // 统计视图下不该再出现渠道列表行——它是整块替换。
   check('统计视图不渲染渠道列表', countRows(stats), 0)
   // WorkBuddy 分区与设置面板同理：它们挂在 body 的其它位置，
@@ -366,12 +406,14 @@ check('收起时不显示配置面板',
     .filter(text => typeof text === 'string' && text.length > 0)
     .join(' ')
 
+  // 今日积分已经提到独立的「今日」列（与 WorkBuddy 账号行对齐），
+  // 不再以「今日 −X」的小字挂在余额下面。
   const withToday = textsOf({ [IDX.rows]: rows, [IDX.today]: { qoder: 320 } })
-  check('今日累计显示在对应渠道上', withToday.includes('今日 −320'), true)
-  check('没有累计的渠道不显示今日', (withToday.match(/今日/g) || []).length, 1)
+  check('今日积分显示在对应渠道上', withToday.includes('−320'), true)
+  check('没有今日消耗的渠道显示占位点', (withToday.match(/·/g) || []).length >= 1, true)
 
   const noToday = textsOf({ [IDX.rows]: rows, [IDX.today]: {} })
-  check('累计表为空时不显示今日', noToday.includes('今日'), false)
+  check('累计表为空时不显示今日数字', noToday.includes('−320'), false)
 }
 
 // ── 8. 告警档位落到行上 ───────────────────────────────────────────────────

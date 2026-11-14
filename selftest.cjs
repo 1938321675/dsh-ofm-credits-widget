@@ -623,6 +623,30 @@ check('formatTokens NaN', t.formatTokens(NaN), '—')
   check('indexOfDate 空列表', t.indexOfDate([], '2026-11-11'), -1)
 }
 
+// ── 18. 统计界面的分隔高度 ────────────────────────────────────────────────
+// 与卡片尺寸同一套语义：没拖过是 null（随内容），拖过之后夹进可用范围。
+check('clampStatsSplit 原样返回合法值', t.clampStatsSplit(120, 400), 120)
+check('clampStatsSplit 顶住下限', t.clampStatsSplit(10, 400), t.STATS_SPLIT_MIN)
+check('clampStatsSplit 顶住上限', t.clampStatsSplit(9999, 400), 400)
+check('clampStatsSplit 上限小于下限时用下限', t.clampStatsSplit(9999, 10), t.STATS_SPLIT_MIN)
+check('clampStatsSplit 取整', t.clampStatsSplit(120.6, 400), 121)
+check('clampStatsSplit NaN 返回 null', t.clampStatsSplit(NaN, 400), null)
+
+{
+  global.window.localStorage._data.delete(t.STATS_SPLIT_KEY)
+  check('没存过时读成 null（随内容自适应）', t.loadStatsSplit(), null)
+
+  t.saveStatsSplit(180)
+  check('存过之后读回同一个值', t.loadStatsSplit(), 180)
+
+  global.window.localStorage.setItem(t.STATS_SPLIT_KEY, '不是数字')
+  check('坏值回落成 null', t.loadStatsSplit(), null)
+
+  global.window.localStorage.setItem(t.STATS_SPLIT_KEY, '5')
+  check('小于下限的存量值回落成 null', t.loadStatsSplit(), null)
+  global.window.localStorage._data.delete(t.STATS_SPLIT_KEY)
+}
+
 // ── 收口 ──────────────────────────────────────────────────────────────────
 testReadChannel()
   .then(testReadChannelDetail)
