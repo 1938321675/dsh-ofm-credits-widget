@@ -296,6 +296,10 @@ check('收起时不显示配置面板',
   check('统计视图渲染出统计块', statsOf(stats)?.props['data-ofm-credit-watch-stats'], 'section')
   // 统计视图下不该再出现渠道列表行——它是整块替换。
   check('统计视图不渲染渠道列表', countRows(stats), 0)
+  // WorkBuddy 分区与设置面板同理：它们挂在 body 的其它位置，
+  // 只换列表会让统计页看起来只铺了上半部分。
+  check('统计视图不渲染 WorkBuddy 分区', wbSectionOf(stats) === undefined, true)
+  check('统计视图不渲染设置面板', hasConfigPane(stats), false)
 
   // 默认跟最新一天走：11-11 的渠道是 trae。
   const channelIds = flatten(stats).filter(n => n.props !== undefined && n.props['data-stats-channel'] !== undefined)

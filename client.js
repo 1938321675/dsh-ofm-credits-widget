@@ -1949,7 +1949,9 @@ window.__ModuleLoader__.load({
         //
         // 设置面板展开时让位：勾选表是"就地展开"的操作区，它上面不该再压
         // 一段与勾选无关的内容，否则设置一打开就得先往下滚。
-        configOpen ? null : wbSection,
+        // 统计视图是整块替换，WorkBuddy 分区在这里让位；否则它会挂在统计页
+        // 下面，看起来像统计页只铺了一半。
+        view === 'stats' || configOpen ? null : wbSection,
         // 配置面板：与列表同宽就地展开，列出全部渠道（含已隐藏的），
         // 每行显示当前余额，方便判断"这个穷光蛋渠道可以藏起来"。
         collapsed || !configOpen ? null : h('div', { style: style.configPane, 'data-ofm-credit-watch-config': 'pane' },
