@@ -219,6 +219,8 @@ window.__ModuleLoader__.load({
         expireOn: '{date} 过期',
         packageLine: '{name} {remaining}/{total}',
         wbTitle: 'WorkBuddy 账号',
+        wbColAccount: '账号',
+        wbColBalance: '余额',
         wbToday: '今日',
         wbTotal: '累计',
         wbUnavailable: '未连接 WorkBuddy',
@@ -271,6 +273,8 @@ window.__ModuleLoader__.load({
         expireOn: 'expires {date}',
         packageLine: '{name} {remaining}/{total}',
         wbTitle: 'WorkBuddy accounts',
+        wbColAccount: 'account',
+        wbColBalance: 'left',
         wbToday: 'today',
         wbTotal: 'total',
         wbUnavailable: 'WorkBuddy not connected',
@@ -1457,10 +1461,18 @@ window.__ModuleLoader__.load({
           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         },
         // 四列：账号 / 今日 / 累计 / 余额。与渠道行对齐，右三列都右对齐。
+        // 列头与账号行共用同一套网格，改列宽只改这一处。
         wbRow: {
           display: 'grid', gridTemplateColumns: '1fr 48px 48px 56px',
           alignItems: 'center', gap: 8, padding: '4px 10px',
         },
+        // 列头：比账号行再小半号、更淡一档，读完就该忽略掉。
+        wbColHead: {
+          display: 'grid', gridTemplateColumns: '1fr 48px 48px 56px',
+          alignItems: 'center', gap: 8, padding: '1px 10px 3px',
+          fontSize: 10, color: 'var(--dsw-alias-label-secondary, #888)',
+        },
+        wbColHeadCell: { textAlign: 'right', whiteSpace: 'nowrap' },
         wbNameCell: { minWidth: 0, display: 'flex', flexDirection: 'column' },
         wbName: { fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
         wbCell: {
@@ -1509,7 +1521,14 @@ window.__ModuleLoader__.load({
             h('span', { style: style.meta }, wbOpen ? '▾' : '▸')),
           wbRows.length === 0
             ? h('div', { style: style.wbEmpty }, t('wbNoAccounts'))
-            : !wbOpen ? null : wbRows.map(row => {
+            : !wbOpen ? null : [
+              // 列头：三列数字长得一模一样（都是 −数字），不标出来就得靠猜。
+              h('div', { key: '__colhead', style: style.wbColHead, 'data-wb-colhead': 'true' },
+                h('span', null, t('wbColAccount')),
+                h('span', { style: style.wbColHeadCell }, t('wbToday')),
+                h('span', { style: style.wbColHeadCell }, t('wbTotal')),
+                h('span', { style: style.wbColHeadCell }, t('wbColBalance'))),
+              ...wbRows.map(row => {
               const usedToday = wbLedger.daily[row.key]
               const usedTotal = wbLedger.cumulative[row.key]
               return h('div', { key: row.key, style: style.wbRow, 'data-wb-account': row.key },
@@ -1518,17 +1537,19 @@ window.__ModuleLoader__.load({
                   h('span', { style: style.meta },
                     `${row.region === 'cn' ? t('wbRegionCn') : t('wbRegionGlobal')}${
                       row.selected ? ' · ✓' : ''}`)),
+                // 记过账就是 −0（今天还没花），没记过才是 ·（没有数据）——
+                // 两者都写成 · 会让人分不清"今天没花"和"没统计到"。
                 h('span', { style: style.wbCell },
-                  Number.isFinite(usedToday) && usedToday > 0
+                  Number.isFinite(usedToday)
                     ? `−${formatAmount(usedToday, 'credits')}`
                     : '·'),
                 h('span', { style: style.wbCell },
-                  Number.isFinite(usedTotal) && usedTotal > 0
+                  Number.isFinite(usedTotal)
                     ? `−${formatAmount(usedTotal, 'credits')}`
                     : '·'),
                 h('span', { style: style.wbAmount },
                   Number.isFinite(row.credits) ? formatAmount(row.credits, 'credits') : t('wbNoCredits')))
-            }))
+            })])
       })()
 
       // ── 隐藏态：只留一个小胶囊，避免占着屏幕又找不回来 ───────────────────

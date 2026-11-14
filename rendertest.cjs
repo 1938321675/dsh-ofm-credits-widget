@@ -233,6 +233,26 @@ check('收起时不显示配置面板',
   })
   check('展开后每个账号一行', countWbRows(expanded), 3)
 
+  // 三列数字长得一样（都是 −数字），没有列头就得靠猜。
+  const head = flatten(expanded).find(node => node.props !== undefined && node.props['data-wb-colhead'] === 'true')
+  check('展开后有列头', head !== undefined, true)
+  check('列头四格', head.children.length, 4)
+
+  // 记过账的账号显示 −0，没记过的显示 ·：两者含义不同。
+  const zero = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.wbRows]: wbRows(), [IDX.wbOpen]: true,
+    [IDX.wbLedger]: { daily: { 'wb:cn:a1': 0 }, cumulative: { 'wb:cn:a1': 0 } },
+  })
+  const texts = []
+  const walk = node => {
+    if (typeof node === 'string') { texts.push(node); return }
+    if (node === null || typeof node !== 'object') return
+    for (const child of node.children || []) walk(child)
+  }
+  walk(zero)
+  check('今日为 0 时显示 −0', texts.join(' ').includes('−0'), true)
+
   // 有账号但一个积分都读不到：行仍然在（面板的职责是让人看到有哪些号）。
   const empty = render({
     [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
