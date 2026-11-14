@@ -157,7 +157,7 @@ const IDX = {
   // WorkBuddy 分区：接在 size 之后，前十五个下标不受影响。
   wbRows: 15, wbLedger: 16, wbConnected: 17, wbOpen: 18, wbLoading: 19,
   // 视图与 token 用量：接在 WorkBuddy 之后。
-  view: 20, usage: 21, usageDate: 22, statsSplit: 23,
+  view: 20, usage: 21, usageDate: 22, statsSplit: 23, mainSplit: 24,
 }
 
 /** WorkBuddy 分区节点。 */
@@ -243,12 +243,9 @@ check('收起时不显示配置面板',
   })
   check('展开后每个账号一行', countWbRows(expanded), 3)
 
-  // 三列数字长得一样（都是 −数字），没有列头就得靠猜。
+  // 不再有列头：列的语义与上方渠道行一致，靠对齐与位置自明。
   const head = flatten(expanded).find(node => node.props !== undefined && node.props['data-wb-colhead'] === 'true')
-  check('展开后有列头', head !== undefined, true)
-  // 四格：空色条占位 + 账号 / 今日 / 余额。首格是透明的对齐占位，
-  // 让「今日」「余额」与上方渠道行的同名列落在同一竖线上。
-  check('列头四格（含对齐占位）', head.children.length, 4)
+  check('展开后没有列头', head, undefined)
 
   // 记过账的账号显示 −0，没记过的显示 ·：两者含义不同。
   const zero = render({
@@ -314,7 +311,9 @@ check('收起时不显示配置面板',
   })
   const usageTexts = allText(withUsage).join(' ')
   // 100 + 900 + 0 = 1000，走 kilo 原样显示（一万以下不缩写）。
-  check('渠道行显示今日 token', usageTexts.includes('token 1000'), true)
+  // 小字只有一个数字，不带「token」这种字样——列的语义靠位置自明。
+  check('渠道行显示今日 token', usageTexts.includes('1000'), true)
+  check('渠道行不带 token 字样', usageTexts.includes('token'), false)
 
   const noUsage = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.usage]: { available: false, days: [] } })
   const noUsageTexts = allText(noUsage).join(' ')
@@ -362,6 +361,26 @@ check('收起时不显示配置面板',
   // 空账本：同样是空状态。
   const emptyStats = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats', [IDX.usage]: { available: true, days: [] } })
   check('没有数据时显示空状态', statsOf(emptyStats)?.props['data-ofm-credit-watch-stats'], 'empty')
+}
+
+// ── 4d. 主界面的分隔条 ────────────────────────────────────────────────────
+{
+  const mainSplitterOf = tree => flatten(tree).find(n => n.props !== undefined && n.props['data-main-splitter'] === 'true')
+  const mainListOf = tree => flatten(tree).find(n => n.props !== undefined && n.props['data-main-list'] === 'true')
+
+  const list = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })
+  check('列表视图有主界面分隔条', mainSplitterOf(list) !== undefined, true)
+  check('主界面分隔条用上下拖动光标', mainSplitterOf(list)?.props.style?.cursor, 'row-resize')
+  check('没拖过时渠道列表没有固定高度', mainListOf(list)?.props.style?.height, undefined)
+
+  const sized = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.mainSplit]: 180 })
+  check('拖过之后渠道列表带固定高度', mainListOf(sized)?.props.style?.height, 180)
+
+  // 统计视图与设置面板里，上半区不是列表，分隔条不出现。
+  check('统计视图没有主界面分隔条',
+    mainSplitterOf(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats' })), undefined)
+  check('设置面板展开时没有主界面分隔条',
+    mainSplitterOf(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.configOpen]: true })), undefined)
 }
 
 // ── 5. 隐藏后合计与列表一致 ───────────────────────────────────────────────

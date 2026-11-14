@@ -79,6 +79,8 @@ window.__ModuleLoader__.load({
     const STATS_SPLIT_KEY = 'ofm-credit-watch.statsSplit'
     /** 明细区最少留几行的高度，再小就没有滚动条的意义了。 */
     const STATS_SPLIT_MIN = 48
+    /** 主界面「渠道列表 / WorkBuddy 分区」的分隔高度持久化键。 */
+    const MAIN_SPLIT_KEY = 'ofm-credit-watch.mainSplit'
     /** 「都在安静」的判定窗口：超过它就当作不活跃。 */
     const IDLE_WINDOW_MS = 5 * 60_000
     /** 卡片默认宽度：位置换算、拖动夹取、手柄复位共用一个常量。 */
@@ -244,9 +246,9 @@ window.__ModuleLoader__.load({
         statsPrev: '前一天',
         statsNext: '后一天',
         statsNoData: '暂无数据',
-        tokenToday: 'token',
         wbAccumulated: '累计积分',
         statsSplitHint: '上下拖动改变明细区高度，双击复位',
+        mainSplitHint: '上下拖动改变渠道列表高度，双击复位',
         wbToday: '今日',
         wbTotal: '累计',
         wbUnavailable: '未连接 WorkBuddy',
@@ -314,9 +316,9 @@ window.__ModuleLoader__.load({
         statsPrev: 'Previous day',
         statsNext: 'Next day',
         statsNoData: 'no data',
-        tokenToday: 'tokens',
         wbAccumulated: 'total credits',
         statsSplitHint: 'Drag up or down to resize, double-click to reset',
+        mainSplitHint: 'Drag to resize the channel list, double-click to reset',
         wbToday: 'today',
         wbTotal: 'total',
         wbUnavailable: 'WorkBuddy not connected',
@@ -564,6 +566,19 @@ window.__ModuleLoader__.load({
 
     function saveStatsSplit(height) {
       try { window.localStorage?.setItem(STATS_SPLIT_KEY, String(height)) } catch { /* 存储不可用 */ }
+    }
+
+    /** 主界面上下两块的分隔高度；语义与卡片尺寸一致，null 表示随内容。 */
+    function loadMainSplit() {
+      try {
+        const raw = Number(window.localStorage?.getItem(MAIN_SPLIT_KEY))
+        if (Number.isFinite(raw) && raw >= STATS_SPLIT_MIN) return Math.round(raw)
+      } catch { /* 存储不可用 */ }
+      return null
+    }
+
+    function saveMainSplit(height) {
+      try { window.localStorage?.setItem(MAIN_SPLIT_KEY, String(height)) } catch { /* 存储不可用 */ }
     }
 
     /** 把明细区高度夹进可用范围；上限由调用方按卡片实际高度给。 */
@@ -1019,6 +1034,8 @@ window.__ModuleLoader__.load({
       const [usageDate, setUsageDate] = useState('')
       // 统计界面「渠道明细」区的高度：null 表示随内容自适应，拖过分隔条后固定。
       const [statsSplit, setStatsSplit] = useState(loadStatsSplit)
+      // 主界面「渠道列表」区的高度：同上，拖过中间的横条后固定。
+      const [mainSplit, setMainSplit] = useState(loadMainSplit)
 
       // 上一轮读数与串行保护：轮询和手动刷新可能重叠，只允许最新一轮落库。
       const previous = useRef(null)
@@ -1423,46 +1440,77 @@ window.__ModuleLoader__.load({
       // 与卡片八向缩放同一套 pointer 捕获：拖出卡片范围也不中断。
       // 存的是明细区高度；上限取「卡片内容区还要给下半区留位置」之后的值。
       const splitDrag = useRef(null)
-      const splitHandlers = {
-        onPointerDown: event => {
-          if (event.button !== undefined && event.button !== 0) return
-          const target = event.currentTarget
-          const list = target?.parentElement?.querySelector?.('[data-stats-list]')
-          if (list === null || list === undefined) return
-          splitDrag.current = {
-            startY: event.clientY,
-            startHeight: list.offsetHeight,
-            maxHeight: Math.max(STATS_SPLIT_MIN, list.offsetHeight + (list.parentElement?.offsetHeight ?? 0) - STATS_SPLIT_MIN),
-          }
-          try { target.setPointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
-          event.preventDefault()
-          event.stopPropagation()
-        },
-        onPointerMove: event => {
-          const state = splitDrag.current
-          if (state === null) return
-          const next = clampStatsSplit(state.startHeight + (event.clientY - state.startY), state.maxHeight)
-          setStatsSplit(next)
-          event.preventDefault()
-        },
-        onPointerUp: event => {
-          if (splitDrag.current === null) return
-          splitDrag.current = null
-          try { event.currentTarget?.releasePointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
-          // 拖动期间只更新界面，松手才落盘：拖动每帧都写 localStorage 没必要。
-          setStatsSplit(current => {
-            if (current !== null) saveStatsSplit(current)
-            return current
-          })
-        },
-        // 双击复位：回到随内容自适应。
-        onDoubleClick: event => {
-          event.preventDefault()
-          event.stopPropagation()
+      /**
+       * 分隔条的拖动处理。
+       *
+       * 两块（主界面 / 统计界面）的分隔条行为完全一样，只是写回的状态与
+       * 持久化键不同，所以抽成一个工厂，不写两份。
+       */
+      function makeSplitHandlers({ listSelector, onChange, onCommit, onReset }) {
+        return {
+          onPointerDown: event => {
+            if (event.button !== undefined && event.button !== 0) return
+            const target = event.currentTarget
+            const list = target?.parentElement?.querySelector?.(listSelector)
+            if (list === null || list === undefined) return
+            splitDrag.current = {
+              startY: event.clientY,
+              startHeight: list.offsetHeight,
+              maxHeight: Math.max(STATS_SPLIT_MIN, list.offsetHeight + (list.parentElement?.offsetHeight ?? 0) - STATS_SPLIT_MIN),
+              onChange, onCommit,
+            }
+            try { target.setPointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
+            event.preventDefault()
+            event.stopPropagation()
+          },
+          onPointerMove: event => {
+            const state = splitDrag.current
+            if (state === null) return
+            state.onChange(clampStatsSplit(state.startHeight + (event.clientY - state.startY), state.maxHeight))
+            event.preventDefault()
+          },
+          onPointerUp: event => {
+            if (splitDrag.current === null) return
+            const state = splitDrag.current
+            splitDrag.current = null
+            try { event.currentTarget?.releasePointerCapture?.(event.pointerId) } catch { /* 非指针环境 */ }
+            state.onCommit()
+          },
+          onDoubleClick: event => {
+            event.preventDefault()
+            event.stopPropagation()
+            onReset()
+          },
+        }
+      }
+
+      // 统计界面：明细区高度。
+      const splitHandlers = makeSplitHandlers({
+        listSelector: '[data-stats-list]',
+        onChange: setStatsSplit,
+        onCommit: () => setStatsSplit(current => {
+          if (current !== null) saveStatsSplit(current)
+          return current
+        }),
+        onReset: () => {
           setStatsSplit(null)
           try { window.localStorage?.removeItem(STATS_SPLIT_KEY) } catch { /* 存储不可用 */ }
         },
-      }
+      })
+
+      // 主界面：渠道列表高度。拖动期间只更新界面，松手才落盘。
+      const mainSplitHandlers = makeSplitHandlers({
+        listSelector: '[data-main-list]',
+        onChange: setMainSplit,
+        onCommit: () => setMainSplit(current => {
+          if (current !== null) saveMainSplit(current)
+          return current
+        }),
+        onReset: () => {
+          setMainSplit(null)
+          try { window.localStorage?.removeItem(MAIN_SPLIT_KEY) } catch { /* 存储不可用 */ }
+        },
+      })
 
       // ── 排序与汇总 ───────────────────────────────────────────────────────
       // 只有被勾选显示的渠道才参与列表渲染与排序；数据仍然全部采集，
@@ -1574,6 +1622,15 @@ window.__ModuleLoader__.load({
         body: size.height === null || collapsed
           ? { maxHeight: 320, overflowY: 'auto', padding: '4px 0 6px' }
           : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0 6px' },
+        // 主界面渠道列表：没拖过横条时随内容长；拖过之后固定高度并自己滚动。
+        mainListAuto: { overflowY: 'auto' },
+        mainList: { overflowY: 'auto' },
+        // 主界面分隔条：与统计界面那条同一手感，抓取区 7px。
+        mainSplitter: {
+          height: 7, margin: '1px 0', cursor: 'row-resize', touchAction: 'none',
+          borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))',
+          background: 'transparent',
+        },
         // 四列：色条 / 名称 / 本分钟消耗 / 余额（余额下方叠当日累计）。
         // 消耗与余额分成两列，数字不再挤在同一格里——量级差很大时
         // （1352 余额 vs −1.0 消耗）挤在一列会读成一串。
@@ -1715,13 +1772,6 @@ window.__ModuleLoader__.load({
           display: 'grid', gridTemplateColumns: '3px 1fr 52px 64px',
           alignItems: 'center', gap: 8, padding: '4px 10px',
         },
-        // 列头：与账号行同一套网格，比它再小半号、更淡一档，读完就该忽略掉。
-        wbColHead: {
-          display: 'grid', gridTemplateColumns: '3px 1fr 52px 64px',
-          alignItems: 'center', gap: 8, padding: '1px 10px 3px',
-          fontSize: 10, color: 'var(--dsw-alias-label-secondary, #888)',
-        },
-        wbColHeadCell: { textAlign: 'right', whiteSpace: 'nowrap' },
         wbNameCell: { minWidth: 0, display: 'flex', flexDirection: 'column' },
         wbName: { fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
         wbCell: {
@@ -1868,18 +1918,11 @@ window.__ModuleLoader__.load({
             h('span', { style: style.wbSum },
               wbTodaySum === null ? '—' : `${t('wbToday')} −${formatAmount(wbTodaySum, 'credits')}`,
               // 今日 token：所有账号合起来一个数，与 cost-meter 面板口径一致。
-              wbTokensToday === null ? '' : ` · token ${formatTokens(wbTokensToday)}`),
+              wbTokensToday === null ? '' : ` · ${formatTokens(wbTokensToday)}`),
             h('span', { style: style.meta }, wbOpen ? '▾' : '▸')),
           wbRows.length === 0
             ? h('div', { style: style.wbEmpty }, t('wbNoAccounts'))
-            : !wbOpen ? null : [
-              // 列头：三列数字长得一模一样（都是 −数字），不标出来就得靠猜。
-              h('div', { key: '__colhead', style: style.wbColHead, 'data-wb-colhead': 'true' },
-                h('span', null, null),
-                h('span', null, t('wbColAccount')),
-                h('span', { style: style.wbColHeadCell }, t('wbToday')),
-                h('span', { style: style.wbColHeadCell }, t('wbColBalance'))),
-              ...wbRows.map(row => {
+            : !wbOpen ? null : wbRows.map(row => {
               const usedToday = wbLedger.daily[row.key]
               return h('div', { key: row.key, style: style.wbRow, 'data-wb-account': row.key },
                 // 与渠道行同宽的空色条：让「今日」「余额」两列和上面严格对齐。
@@ -1897,7 +1940,8 @@ window.__ModuleLoader__.load({
                     : '·'),
                 h('span', { style: style.wbAmount },
                   Number.isFinite(row.credits) ? formatAmount(row.credits, 'credits') : t('wbNoCredits')))
-            })])
+            })
+        )
       })()
 
       // ── 隐藏态：只留一个小胶囊，避免占着屏幕又找不回来 ───────────────────
@@ -2001,7 +2045,12 @@ window.__ModuleLoader__.load({
         collapsed ? null : h('div', { style: style.body },
           // 统计视图：整块替换掉渠道列表与 WorkBuddy 分区。
           view === 'stats' ? statsSection
-          : rows.length === 0
+          // 列表视图：渠道列表包进可调高的容器，中间的横条拖它改高度。
+          : h('div', {
+            style: mainSplit === null ? style.mainListAuto : { ...style.mainList, height: mainSplit },
+            'data-main-list': 'true',
+          },
+          rows.length === 0
             ? h('div', { style: style.empty }, error !== '' ? error : t('never'))
             : ordered.length === 0
               // 全部被隐藏：给出回程路径，而不是留一片空白让人以为坏了。
@@ -2056,8 +2105,18 @@ window.__ModuleLoader__.load({
                   // 口径，分开读比挤在一行里清楚。
                   channelTokens === null
                     ? null
-                    : h('span', { style: style.today }, `${t('tokenToday')} ${formatTokens(channelTokens)}`)))
+                    : h('span', { style: style.today }, formatTokens(channelTokens))))
             }))),
+          ),
+        // 主界面分隔条：上下拖动改渠道列表高度，双击复位。
+        // 统计视图或设置面板展开时不出现——那两种情况下上半区不是列表。
+        view === 'stats' || configOpen ? null : h('div', {
+          key: '__split',
+          style: style.mainSplitter,
+          'data-main-splitter': 'true',
+          title: t('mainSplitHint'),
+          ...mainSplitHandlers,
+        }),
         // WorkBuddy 分区放在渠道列表之后：它是另一套上游，视觉上与上面隔开，
         // 但共用同一个滚动区，不额外占用卡片高度。
         //
@@ -2151,6 +2210,7 @@ window.__ModuleLoader__.load({
       mapLimit, shouldPollChannel, failureRow, sumSpend, wbLedgerKey,
       totalTokens, formatTokens, fetchUsage, indexOfDate, USAGE_URL, VIEW_KEY, STATS_DAYS,
       loadStatsSplit, saveStatsSplit, clampStatsSplit, STATS_SPLIT_KEY, STATS_SPLIT_MIN,
+      loadMainSplit, saveMainSplit, MAIN_SPLIT_KEY,
       fetchWorkBuddyRegion, normalizeWorkBuddy, MAX_CONCURRENCY, HIDDEN_POLL_MS, STALE_ROW_MS, WB_POLL_MS,
       formatAmount, unitOf, toneOf, expireOf, tooltipOf, normalizeTotals,
       accumulateLocal, loadLocalDaily, loadPos, leftOf, localDate, round2,
