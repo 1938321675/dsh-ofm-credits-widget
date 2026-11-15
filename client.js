@@ -1024,8 +1024,10 @@ window.__ModuleLoader__.load({
       const [wbRows, setWbRows] = useState([])
       const [wbLedger, setWbLedger] = useState({ daily: {}, cumulative: {} })
       const [wbConnected, setWbConnected] = useState(true)
+      // 默认展开：没存过就列出账号——这块分区的意义就是「每个账号今天花了多少」，
+      // 折叠着等于没显示。只有用户主动收起过（存了 '0'）才保持折叠。
       const [wbOpen, setWbOpen] = useState(() => {
-        try { return window.localStorage?.getItem(WB_OPEN_KEY) === '1' } catch { return false }
+        try { return window.localStorage?.getItem(WB_OPEN_KEY) !== '0' } catch { return true }
       })
       // WorkBuddy 自己的刷新态：与渠道的 loading 分开，两者互不等待，
       // 标题栏的转圈图标把两个合成一个显示。
