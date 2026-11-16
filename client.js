@@ -1907,6 +1907,45 @@ window.__ModuleLoader__.load({
       // WorkBuddy 所有账号的累计积分合计：主界面不再显示，统计界面给一行。
       const wbAccumulatedTotal = sumSpend(wbRows.map(row => wbLedger.cumulative[row.key]))
 
+      // ── 设置面板 ────────────────────────────────────────────────────────
+      // 与统计页同一层级：整块独占 body。勾选表本身就是「哪些渠道要显示」的
+      // 清单，上面再压一份渠道列表，等于同一批渠道在一屏里出现两次。
+      const configPane = h('div', { style: style.configPane, 'data-ofm-credit-watch-config': 'pane' },
+        h('div', { style: style.configHint }, t('settingsHint')),
+        CHANNELS.map(channel => {
+          const row = rows.find(item => item.id === channel.id)
+          const checked = !hiddenIds.has(channel.id)
+          return h('label', {
+            key: channel.id, style: style.option,
+            'data-channel': channel.id, 'data-checked': checked ? 'true' : 'false',
+          },
+            h('input', {
+              type: 'checkbox', style: style.checkbox, checked,
+              onChange: () => persistHidden(toggleHidden(hiddenIds, channel.id)),
+            }),
+            h('span', { style: { width: 3, height: 14, borderRadius: 2, background: channel.accent, flex: '0 0 auto' } }),
+            h('span', { style: style.optionName }, channel.name),
+            h('span', { style: style.optionAmount },
+              row === undefined
+                ? '—'
+                : Number.isFinite(row.total)
+                  ? formatAmount(row.total, row.unit ?? 'credits')
+                  : (row.ok === false ? t('failed') : t('noData'))))
+        }),
+        h('div', { style: style.configActions },
+          h('button', {
+            type: 'button', style: style.pill,
+            onClick: () => persistHidden(new Set(CHANNELS.map(channel => channel.id))),
+          }, t('hideAll')),
+          h('button', {
+            type: 'button', style: style.pill,
+            onClick: () => persistHidden(new Set()),
+          }, t('showAll')),
+          h('button', {
+            type: 'button', style: { ...style.pill, marginLeft: 'auto' },
+            onClick: () => setConfigOpen(false),
+          }, t('settingsDone'))))
+
       // ── 统计界面 ────────────────────────────────────────────────────────
       // 整张卡片切换成统计页：顶部日期条、当天合计、OFM 渠道逐行、WorkBuddy 合计。
       // 主界面的 WorkBuddy 分区只保留当日积分，累计消耗挪到这里。
@@ -2156,6 +2195,9 @@ window.__ModuleLoader__.load({
         collapsed ? null : h('div', { style: style.body },
           // 统计视图：整块替换掉渠道列表与 WorkBuddy 分区。
           view === 'stats' ? statsSection
+          // 设置视图：同样整块独占。勾选表本身就是「哪些渠道要显示」的清单，
+          // 上面再压一份渠道列表，等于同一批渠道在一屏里出现两次。
+          : configOpen ? configPane
           // 列表视图：渠道列表包进可调高的容器，中间的横条拖它改高度。
           : h('div', {
             // 拖过分隔条后按固定高度参与上下分配；minHeight 在样式里兜底，
@@ -2240,43 +2282,6 @@ window.__ModuleLoader__.load({
         // 统计视图是整块替换，WorkBuddy 分区在这里让位；否则它会挂在统计页
         // 下面，看起来像统计页只铺了一半。
         view === 'stats' || configOpen ? null : wbSection,
-        // 配置面板：与列表同宽就地展开，列出全部渠道（含已隐藏的），
-        // 每行显示当前余额，方便判断"这个穷光蛋渠道可以藏起来"。
-        collapsed || !configOpen ? null : h('div', { style: style.configPane, 'data-ofm-credit-watch-config': 'pane' },
-          h('div', { style: style.configHint }, t('settingsHint')),
-          CHANNELS.map(channel => {
-            const row = rows.find(item => item.id === channel.id)
-            const checked = !hiddenIds.has(channel.id)
-            return h('label', {
-              key: channel.id, style: style.option,
-              'data-channel': channel.id, 'data-checked': checked ? 'true' : 'false',
-            },
-            h('input', {
-              type: 'checkbox', style: style.checkbox, checked,
-              onChange: () => persistHidden(toggleHidden(hiddenIds, channel.id)),
-            }),
-            h('span', { style: { width: 3, height: 14, borderRadius: 2, background: channel.accent, flex: '0 0 auto' } }),
-            h('span', { style: style.optionName }, channel.name),
-            h('span', { style: style.optionAmount },
-              row === undefined
-                ? '—'
-                : Number.isFinite(row.total)
-                  ? formatAmount(row.total, row.unit ?? 'credits')
-                  : (row.ok === false ? t('failed') : t('noData'))))
-          }),
-          h('div', { style: style.configActions },
-            h('button', {
-              type: 'button', style: style.pill,
-              onClick: () => persistHidden(new Set(CHANNELS.map(channel => channel.id))),
-            }, t('hideAll')),
-            h('button', {
-              type: 'button', style: style.pill,
-              onClick: () => persistHidden(new Set()),
-            }, t('showAll')),
-            h('button', {
-              type: 'button', style: { ...style.pill, marginLeft: 'auto' },
-              onClick: () => setConfigOpen(false),
-            }, t('settingsDone')))),
         // 统计视图不显示页脚：它是「几个渠道有余额 / 隐藏了几个」的列表汇总，
         // 放在用量统计页里既不对题，也挤掉了本就不宽的高度。
         collapsed || view === 'stats' ? null : h('div', { style: style.footer },

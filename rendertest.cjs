@@ -278,7 +278,8 @@ check('收起时不显示配置面板',
     [IDX.wbRows]: wbRows(), [IDX.wbOpen]: true, [IDX.configOpen]: true,
   })
   check('设置面板展开时 WorkBuddy 分区让位', wbSectionOf(withSettings), undefined)
-  check('设置面板展开时渠道行照常渲染', countRows(withSettings), 10)
+  // 设置视图整块独占：勾选表本身就是渠道清单，上面不再重复列一份渠道。
+  check('设置面板展开时不渲染渠道行', countRows(withSettings), 0)
 
   // 隐藏 OFM 渠道不影响 WorkBuddy 分区——两套上游互不牵连。
   const allHiddenOfm = render({
@@ -408,8 +409,8 @@ check('收起时不显示配置面板',
     [IDX.configOpen]: true, [IDX.mainSplit]: 120,
   })
   check('设置面板展开时没有主界面分隔条', mainSplitterOf(withConfig), undefined)
-  // 设置面板展开时列表不能再按拖出来的高度占位，否则勾选表被挤到下半部分。
-  check('设置面板展开时列表不定高', mainListOf(withConfig)?.props.style?.height, undefined)
+  // 设置面板展开时连列表容器都不渲染——勾选表独占 body。
+  check('设置面板展开时没有列表容器', mainListOf(withConfig), undefined)
   const cfgBody = flatten(withConfig).find(n => n.props !== undefined
     && n.props.style !== undefined && n.props.style.padding === '4px 0 6px')
   check('设置面板展开时 body 不做上下分配', cfgBody?.props.style?.display, undefined)
