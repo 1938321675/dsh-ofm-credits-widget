@@ -935,6 +935,24 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 取某一天的用量记录。
+     *
+     * 主界面显示的是「今天花了多少」，所以必须按今天的日期精确取，不能取
+     * 「账本里最后一条」——跨天之后今天还没有调用时，最后一条是昨天的，
+     * 那样数字会一直挂着昨天的不清零。
+     *
+     * 找不到（今天还没产生调用）时返回 null，由调用方显示占位，而不是拿
+     * 昨天的数顶上。
+     */
+    function usageOfDate(days, date) {
+      if (!Array.isArray(days)) return null
+      for (const day of days) {
+        if (day !== null && day !== undefined && day.date === date) return day
+      }
+      return null
+    }
+
     /** 在一组按日期升序的日子里取某天的下标；找不到返回 -1。 */
     function indexOfDate(days, date) {
       for (let i = 0; i < days.length; i += 1) {
@@ -1874,9 +1892,16 @@ window.__ModuleLoader__.load({
       }
 
       // 用量派生量：统计页与 WorkBuddy 分区都要用，统一在两者之前算好。
-      // 今日 token 取账本里最新的一天（也就是今天），所有账号合成一个数。
+      //
+      // 今日 token 必须按「今天的日期」取，不能取账本最后一条：跨天之后今天的
+      // 第一次调用可能还没发生（cost-meter 尚未写入），最后一条就是昨天的，
+      // 取它会让主界面一直显示昨天的量、跨天不清零。
+      const todayUsage = usageOfDate(usage.days, localDate())
+      // 统计页默认落到最近一天；今天没有记录时它就是上一条，这是对的——
+      // 统计页是翻历史的地方，主界面才是「今天」。
       const latestUsage = usage.days.length === 0 ? null : usage.days[usage.days.length - 1]
-      const wbTokensToday = latestUsage === null ? null : totalTokens(latestUsage.workbuddy)
+      // 主界面的「今日 token」：今天没有记录就是 null（显示占位），不拿昨天的顶。
+      const wbTokensToday = todayUsage === null ? null : totalTokens(todayUsage.workbuddy)
       // WorkBuddy 所有账号的累计积分合计：主界面不再显示，统计界面给一行。
       const wbAccumulatedTotal = sumSpend(wbRows.map(row => wbLedger.cumulative[row.key]))
 
@@ -1920,7 +1945,8 @@ window.__ModuleLoader__.load({
             }, '‹'),
             h('span', { style: style.statsDate },
               picked.date,
-              picked.date === latestUsage?.date ? h('span', { style: style.statsTodayTag }, t('statsToday')) : null),
+              // 「今日」标记按真实今天判断：账本里最新一天未必是今天。
+              picked.date === localDate() ? h('span', { style: style.statsTodayTag }, t('statsToday')) : null),
             h('button', {
               type: 'button', style: style.statsArrow,
               title: t('statsNext'), disabled: pickedIndex >= days.length - 1,
@@ -2146,7 +2172,8 @@ window.__ModuleLoader__.load({
               const todayUsed = today[row.id]
               const unit = row.unit ?? 'credits'
               // 本渠道今日的 token 用量；cost-meter 没装或当天没调用就是 null。
-              const channelUsage = latestUsage?.byChannel?.[row.id]
+              // 本渠道今日的 token：同样按今天的日期取，跨天后自然归零。
+              const channelUsage = todayUsage?.byChannel?.[row.id]
               const channelTokens = channelUsage === undefined ? null : totalTokens(channelUsage)
               // 副标题优先报问题，其次报账号数与最近消耗时间——一行放不下三件事。
               const status = row.ok === false
@@ -2295,7 +2322,7 @@ window.__ModuleLoader__.load({
       CreditWatch, readChannel, channelRpc, kilo, signedKilo, span, fill,
       normalizeHidden, toggleHidden, CHANNELS, DICT, HIDDEN_KEY, WB_OPEN_KEY,
       mapLimit, shouldPollChannel, failureRow, sumSpend, wbLedgerKey,
-      totalTokens, formatTokens, fetchUsage, indexOfDate, USAGE_URL, VIEW_KEY, STATS_DAYS,
+      totalTokens, formatTokens, fetchUsage, indexOfDate, usageOfDate, USAGE_URL, VIEW_KEY, STATS_DAYS,
       loadStatsSplit, saveStatsSplit, clampStatsSplit, STATS_SPLIT_KEY, STATS_SPLIT_MIN,
       loadMainSplit, saveMainSplit, MAIN_SPLIT_KEY,
       fetchWorkBuddyRegion, normalizeWorkBuddy, MAX_CONCURRENCY, HIDDEN_POLL_MS, STALE_ROW_MS, WB_POLL_MS,

@@ -503,6 +503,44 @@ check('收起时不显示配置面板',
   global.window.localStorage.setItem(t.MAIN_SPLIT_KEY, '')
 }
 
+// ── 4g. 回归：跨天后主界面今日 token 归零 ─────────────────────────────────
+// 账本里只有昨天和有调用的历史时，主界面不能显示昨天的 token 数。
+{
+  const yesterdayOnly = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.usage]: {
+      available: true,
+      days: [
+        { date: '2000-01-01', ofm: { input: 1, output: 1, cacheRead: 1, calls: 1 }, workbuddy: { input: 500, output: 500, cacheRead: 500, calls: 5 }, byChannel: { qoder: { input: 777, output: 0, cacheRead: 0, calls: 2 } } },
+      ],
+    },
+  })
+  const texts = allText(yesterdayOnly)
+
+  // WorkBuddy 头部：今天没记录时「今日」后面不该跟 token 数字。
+  const wbHead = texts.find(text => typeof text === 'string' && text.includes('今日'))
+  check('跨天后 WorkBuddy 头部不带昨天的 token', /今日s*—s*$/.test(String(wbHead).trim()) || !String(wbHead).includes('1.5k'), true)
+  check('跨天后不显示昨天的 token 数字 1.5k', texts.some(text => String(text).includes('1.5k')), false)
+  // 渠道行：昨天的 777 不能出现（余额是 1000/900/800，不会撞上）。
+  check('跨天后不显示昨天的渠道 token', texts.some(text => String(text) === '777'), false)
+
+  // 今天有记录时正常显示。
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' })
+  const withToday = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.usage]: {
+      available: true,
+      days: [
+        { date: '2000-01-01', ofm: { input: 0, output: 0, cacheRead: 0, calls: 0 }, workbuddy: { input: 0, output: 0, cacheRead: 0, calls: 0 }, byChannel: {} },
+        { date: today, ofm: { input: 1, output: 1, cacheRead: 1, calls: 1 }, workbuddy: { input: 100, output: 100, cacheRead: 800, calls: 3 }, byChannel: { qoder: { input: 10, output: 0, cacheRead: 0, calls: 1 } } },
+      ],
+    },
+  })
+  const todayTexts = allText(withToday).join(' ')
+  check('今天有记录时显示今天的 WorkBuddy token', todayTexts.includes('1000'), true)
+  check('今天有记录时显示今天的渠道 token', todayTexts.includes('10'), true)
+}
+
 // ── 5. 隐藏后合计与列表一致 ───────────────────────────────────────────────
 // 从渲染出的页脚文字里读合计，确认它算的是可见渠道。
 {

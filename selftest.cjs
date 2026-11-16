@@ -623,6 +623,21 @@ check('formatTokens NaN', t.formatTokens(NaN), '—')
   check('indexOfDate 空列表', t.indexOfDate([], '2026-11-11'), -1)
 }
 
+// ── 17b. 按日期取用量（跨天清零）────────────────────────────────────────
+// 主界面显示的是「今天花了多少」，必须按今天精确取。取「账本最后一条」的话，
+// 跨天后今天还没调用时拿到的是昨天的量，数字就永远不归零。
+{
+  const days = [
+    { date: '2026-11-14', workbuddy: { input: 1, output: 1, cacheRead: 1, calls: 1 } },
+    { date: '2026-11-15', workbuddy: { input: 9, output: 9, cacheRead: 9, calls: 9 } },
+  ]
+  check('usageOfDate 命中当天', t.usageOfDate(days, '2026-11-15')?.date, '2026-11-15')
+  check('usageOfDate 今天没记录时返回 null', t.usageOfDate(days, '2026-11-16'), null)
+  check('usageOfDate 空列表', t.usageOfDate([], '2026-11-16'), null)
+  check('usageOfDate 非数组', t.usageOfDate(null, '2026-11-16'), null)
+  check('usageOfDate 跳过脏条目', t.usageOfDate([null, { date: '2026-11-16' }], '2026-11-16')?.date, '2026-11-16')
+}
+
 // ── 18. 统计界面的分隔高度 ────────────────────────────────────────────────
 // 与卡片尺寸同一套语义：没拖过是 null（随内容），拖过之后夹进可用范围。
 check('clampStatsSplit 原样返回合法值', t.clampStatsSplit(120, 400), 120)
