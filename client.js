@@ -1707,7 +1707,9 @@ window.__ModuleLoader__.load({
         //   2. 卡片被拉过右下角：body 吃满剩余空间并滚动；
         //   3. 拖过分隔条：body 变成纵向 flex 容器，上下两块真正分配高度——
         //      列表定高、下半区吃剩余。这样横线拖到哪就跟到哪。
-        body: mainSplit !== null && !collapsed
+        // 设置面板展开时也回到普通布局：那时分隔条不显示，列表若仍按
+        // 拖出来的固定高度占位，勾选表就会被挤到下半部分去。
+        body: mainSplit !== null && !collapsed && !configOpen
           ? { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column', padding: '4px 0 6px' }
           : size.height === null || collapsed
             ? { maxHeight: 320, overflowY: 'auto', padding: '4px 0 6px' }
@@ -2158,7 +2160,8 @@ window.__ModuleLoader__.load({
           : h('div', {
             // 拖过分隔条后按固定高度参与上下分配；minHeight 在样式里兜底，
             // 拖到比内容还矮就停住，不会把行压扁。
-            style: mainSplit === null ? style.mainListAuto : { ...style.mainList, height: mainSplit },
+            // 设置面板展开时不按拖出来的高度定死，让列表回到随内容。
+            style: mainSplit === null || configOpen ? style.mainListAuto : { ...style.mainList, height: mainSplit },
             'data-main-list': 'true',
           },
           rows.length === 0

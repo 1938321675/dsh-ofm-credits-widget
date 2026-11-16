@@ -403,8 +403,16 @@ check('收起时不显示配置面板',
   // 统计视图与设置面板里，上半区不是列表，分隔条不出现。
   check('统计视图没有主界面分隔条',
     mainSplitterOf(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats' })), undefined)
-  check('设置面板展开时没有主界面分隔条',
-    mainSplitterOf(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.configOpen]: true })), undefined)
+  const withConfig = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.configOpen]: true, [IDX.mainSplit]: 120,
+  })
+  check('设置面板展开时没有主界面分隔条', mainSplitterOf(withConfig), undefined)
+  // 设置面板展开时列表不能再按拖出来的高度占位，否则勾选表被挤到下半部分。
+  check('设置面板展开时列表不定高', mainListOf(withConfig)?.props.style?.height, undefined)
+  const cfgBody = flatten(withConfig).find(n => n.props !== undefined
+    && n.props.style !== undefined && n.props.style.padding === '4px 0 6px')
+  check('设置面板展开时 body 不做上下分配', cfgBody?.props.style?.display, undefined)
 }
 
 // ── 4e. 拖动分隔条真的会改高度 ────────────────────────────────────────────
