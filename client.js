@@ -2409,9 +2409,9 @@ window.__ModuleLoader__.load({
         // 一段与勾选无关的内容，否则设置一打开就得先往下滚。
         // 统计视图是整块替换，WorkBuddy 分区在这里让位；否则它会挂在统计页
         // 下面，看起来像统计页只铺了一半。
-        view === 'stats' || configOpen ? null : wbSection,
-        // 北辰分区同理：统计页与设置面板展开时让位。
+        // 北辰分区在 WorkBuddy 之上：它一行就能读完，放在上面比沉到最底更好找。
         view === 'stats' || configOpen ? null : beichenSection,
+        view === 'stats' || configOpen ? null : wbSection,
         // 统计视图不显示页脚：它是「几个渠道有余额 / 隐藏了几个」的列表汇总，
         // 放在用量统计页里既不对题，也挤掉了本就不宽的高度。
         collapsed || view === 'stats' ? null : h('div', { style: style.footer },
