@@ -60,6 +60,8 @@ window.__ModuleLoader__.load({
     const POS_KEY = 'ofm-credit-watch.position'
     /** WorkBuddy 分区展开状态持久化键。 */
     const WB_OPEN_KEY = 'ofm-credit-watch.wbOpen'
+    /** 北辰 API 分区的折叠状态持久化键。 */
+    const BEICHEN_OPEN_KEY = 'ofm-credit-watch.beichenOpen'
     /** 折叠状态持久化键。 */
     const COLLAPSE_KEY = 'ofm-credit-watch.collapsed'
     /** 被用户隐藏的渠道 id 列表持久化键。存「隐藏」而不是「显示」：
@@ -71,6 +73,8 @@ window.__ModuleLoader__.load({
     const LEDGER_URL = '/api/ofm-credit-watch/ledger'
     /** token 用量路由（数据来自 cost-meter 的日聚合账本）。 */
     const USAGE_URL = '/api/ofm-credit-watch/usage'
+    /** 北辰 API 的余额与按日用量：Host 侧解析 Key 并向网关取数。 */
+    const BEICHEN_URL = '/api/ofm-credit-watch/beichen'
     /** 当前视图（列表 / 统计）持久化键。 */
     const VIEW_KEY = 'ofm-credit-watch.view'
     /** 统计界面一屏放几天。 */
@@ -236,6 +240,12 @@ window.__ModuleLoader__.load({
         stats: 'token 统计',
         statsBack: '返回列表',
         statsTitle: '每日 token 用量',
+        beichenName: '北辰 API',
+        beichenSub: '中转网关',
+        beichenNoData: '今日暂无调用',
+        beichenBalance: '剩余余额',
+        beichenTokens: '今日 Token',
+        beichenCache: '缓存读取',
         statsUnavailable: '未连接 cost-meter',
         statsEmpty: '这一天没有调用记录',
         statsToday: '今日',
@@ -306,6 +316,12 @@ window.__ModuleLoader__.load({
         stats: 'Token stats',
         statsBack: 'Back to list',
         statsTitle: 'Daily token usage',
+        beichenName: 'Beichen API',
+        beichenSub: 'relay gateway',
+        beichenNoData: 'No calls today',
+        beichenBalance: 'Balance left',
+        beichenTokens: 'Tokens today',
+        beichenCache: 'cache read',
         statsUnavailable: 'cost-meter not connected',
         statsEmpty: 'No calls on this day',
         statsToday: 'today',
@@ -924,6 +940,19 @@ window.__ModuleLoader__.load({
       return kilo(value)
     }
 
+    /**
+     * 拉北辰 API 的余额与按日用量。
+     *
+     * 不走 channel-pack：北辰是中转网关，余额得由 Host 侧用 API Key 去问，
+     * 而且那条接口只回当天，多天趋势是 Host 自己逐日攒下来的。失败时抛出去，
+     * 调用方保留上一轮读数。
+     */
+    async function fetchBeichen() {
+      const res = await fetch(BEICHEN_URL, { cache: 'no-store' })
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      return await res.json()
+    }
+
     /** 拉 cost-meter 的按天用量。返回 { available, days }。 */
     async function fetchUsage() {
       const res = await fetch(USAGE_URL, { cache: 'no-store' })
@@ -1064,6 +1093,14 @@ window.__ModuleLoader__.load({
       const [statsSplit, setStatsSplit] = useState(loadStatsSplit)
       // 主界面「渠道列表」区的高度：同上，拖过中间的横条后固定。
       const [mainSplit, setMainSplit] = useState(loadMainSplit)
+      // 北辰 API 的余额与按日用量；null 表示还没取到过（首轮之前）。
+      // 声明放在所有 useState 之后：离线渲染测试按声明顺序取下标注入状态，
+      // 插在中间会把后面每一个状态都挤错位。
+      const [beichen, setBeichen] = useState(null)
+      // 北辰分区默认折叠：它与渠道列表是两套账，日常只看标题栏那行就够。
+      const [beichenOpen, setBeichenOpen] = useState(() => {
+        try { return window.localStorage?.getItem(BEICHEN_OPEN_KEY) === '1' } catch { return false }
+      })
 
       // 上一轮读数与串行保护：轮询和手动刷新可能重叠，只允许最新一轮落库。
       const previous = useRef(null)
@@ -1288,6 +1325,21 @@ window.__ModuleLoader__.load({
       }, [])
 
       /**
+       * 采一轮北辰 API。
+       *
+       * 节拍跟 WorkBuddy 走：Host 侧对上游有 60 秒缓存，拉得再勤也不会更准。
+       * 失败时保留上一轮读数——余额看不见比余额略旧更糟。
+       */
+      const pollBeichen = useCallback(async () => {
+        try {
+          const next = await fetchBeichen()
+          if (!alive.current) return
+          // 上游一时读不到时保留上一轮：断一下网不该让余额整行消失。
+          if (next?.ok === true || next?.configured === false) setBeichen(next)
+        } catch { /* Host 没有这条路由：保留上一轮 */ }
+      }, [])
+
+      /**
        * 采一轮 WorkBuddy：读两个区域的账号积分，交给 Host 记账，取回今日与累计。
        *
        * 报给账本的是"每个账号当前的积分总量"。跳不跳过一个账号由 Host 判断
@@ -1326,12 +1378,14 @@ window.__ModuleLoader__.load({
         }).catch(() => { /* Host 没有 wb 账本路由，等采样时再试 */ })
         void pollWorkBuddy()
         void pollUsage()
+        void pollBeichen()
         let timer
         const start = () => {
           if (timer !== undefined) return
           timer = window.setInterval(() => {
             void pollWorkBuddy()
             void pollUsage()
+            void pollBeichen()
           }, WB_POLL_MS)
         }
         const stop = () => {
@@ -1341,7 +1395,7 @@ window.__ModuleLoader__.load({
         }
         // 与 OFM 轮询同一套可见性规则：看不见的时候不采样。
         const onVisibility = () => {
-          if (document.visibilityState === 'visible') { void pollWorkBuddy(); void pollUsage(); start() } else { stop() }
+          if (document.visibilityState === 'visible') { void pollWorkBuddy(); void pollUsage(); void pollBeichen(); start() } else { stop() }
         }
         start()
         document.addEventListener('visibilitychange', onVisibility)
@@ -1349,7 +1403,7 @@ window.__ModuleLoader__.load({
           stop()
           document.removeEventListener('visibilitychange', onVisibility)
         }
-      }, [pollWorkBuddy, pollUsage])
+      }, [pollWorkBuddy, pollUsage, pollBeichen])
 
       // 每 10 秒走一次"现在"，让"3 分钟前有消耗"这类相对时间自己走字，
       // 而不用为了刷新相对时间重发 RPC。
@@ -1946,6 +2000,10 @@ window.__ModuleLoader__.load({
             onClick: () => setConfigOpen(false),
           }, t('settingsDone'))))
 
+      // 北辰 API 的读数派生量：分区标题栏与统计页都要用。
+      const beichenBalance = beichen !== null && Number.isFinite(beichen.balance) ? beichen.balance : null
+      const beichenToday = beichen?.today ?? null
+
       // ── 统计界面 ────────────────────────────────────────────────────────
       // 整张卡片切换成统计页：顶部日期条、当天合计、OFM 渠道逐行、WorkBuddy 合计。
       // 主界面的 WorkBuddy 分区只保留当日积分，累计消耗挪到这里。
@@ -2007,6 +2065,23 @@ window.__ModuleLoader__.load({
             h('div', { style: style.statsTotalCell },
               h('div', { style: style.statsTotalLabel }, t('statsWb')),
               h('div', { style: style.statsTotalValue, 'data-wb-token-total': 'true' }, formatTokens(wbTotal)))),
+
+          // 北辰 API：跟上面同一套日期条翻历史。接口只回当天，这里的每一天
+          // 都是 Host 逐日攒下来的——接上之前的日子本来就没有数，留占位。
+          beichen === null || beichen.configured === false ? null : (() => {
+            const day = usageOfDate(Array.isArray(beichen.days) ? beichen.days : [], picked.date)
+            return h('div', {
+              style: {
+                display: 'flex', alignItems: 'baseline', gap: 8, padding: '6px 2px 2px',
+                fontSize: 11, color: 'var(--dsw-alias-label-secondary, #888)',
+              },
+              'data-beichen': 'day',
+            },
+              h('span', { style: { width: 3, alignSelf: 'stretch', borderRadius: 2, background: '#4C8DFF' } }),
+              h('span', { style: { fontWeight: 600 } }, t('beichenName')),
+              h('span', null, day === null ? t('statsEmpty') : `${formatTokens(day.totalTokens)} tok`),
+              h('span', { style: { marginLeft: 'auto' } }, day === null ? '' : `−$${day.actualCost.toFixed(2)}`))
+          })(),
 
           // 渠道明细：当天有调用的渠道逐行列出。高度可调，超出部分自己滚动——
           // 渠道多的日子里，这一区是唯一会变长的地方。
@@ -2094,6 +2169,58 @@ window.__ModuleLoader__.load({
         )
       })()
 
+      // ── 北辰 API 分区 ────────────────────────────────────────────────────
+      // 与 WorkBuddy 同一种折叠分区：标题栏常驻，展开才看明细。北辰不是
+      // channel-pack 的渠道，所以不进上面的渠道列表——否则「几个渠道有余额」
+      // 这类汇总会被一个口径完全不同的上游污染。
+      const beichenSection = beichenBalance === null ? null : (() => {
+        const toggle = () => setBeichenOpen(open => {
+          const next = !open
+          try { window.localStorage?.setItem(BEICHEN_OPEN_KEY, next ? '1' : '0') } catch { /* 存储不可用 */ }
+          return next
+        })
+        const today = beichenToday ?? {}
+        const spent = `−$${Number(today.actualCost ?? 0).toFixed(2)}`
+        return h('div', { style: style.wbWrap, 'data-ofm-credit-watch-beichen': 'section' },
+          h('div', {
+            style: style.wbHead, onClick: toggle, role: 'button',
+            title: beichenOpen ? t('wbCollapse') : t('wbExpand'),
+            'aria-expanded': beichenOpen ? 'true' : 'false',
+          },
+            h('span', { style: style.wbTitle }, t('beichenName')),
+            // 余额跟标题一起左对齐：折叠时最想看的就是「还剩多少」，
+            // 它不该藏在展开之后。颜色沿用余额告警档位。
+            h('span', {
+              style: {
+                marginLeft: 'auto', fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap',
+                fontVariantNumeric: 'tabular-nums', color: TONE[toneOf(beichenBalance, 'USD')],
+              },
+              'data-beichen-balance': 'title',
+            }, formatAmount(beichenBalance, 'USD')),
+            h('span', { style: { ...style.wbSum, marginLeft: 0 } }, beichenToday === null
+              ? t('beichenNoData')
+              : `${t('wbToday')} ${spent} · ${formatTokens(today.totalTokens ?? 0)}`),
+            h('span', { style: style.meta }, beichenOpen ? '▾' : '▸')),
+          !beichenOpen ? null : h('div', null,
+            // 余额行：与上面渠道行同宽的空色条，让两列对齐到同一条竖线。
+            h('div', { style: style.wbRow, 'data-beichen-row': 'balance' },
+              h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
+              h('span', { style: style.wbNameCell },
+                h('span', { style: style.wbName }, t('beichenBalance')),
+                h('span', { style: style.meta }, typeof beichen?.plan === 'string' ? beichen.plan : '')),
+              h('span', { style: style.wbCell }, beichenToday === null ? '·' : fill(t('statsCalls'), { count: today.requests ?? 0 })),
+              h('span', { style: { ...style.wbAmount, color: TONE[toneOf(beichenBalance, 'USD')] } },
+                formatAmount(beichenBalance, 'USD'))),
+            // 用量行：今日 token 与扣费。缓存读取单独列出来，钱主要花在这上面。
+            h('div', { style: style.wbRow, 'data-beichen-row': 'tokens' },
+              h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
+              h('span', { style: style.wbNameCell },
+                h('span', { style: style.wbName }, t('beichenTokens')),
+                h('span', { style: style.meta }, `${t('beichenCache')} ${formatTokens(today.cacheReadTokens ?? 0)}`)),
+              h('span', { style: style.wbCell }, beichenToday === null ? '·' : spent),
+              h('span', { style: style.wbAmount }, formatTokens(today.totalTokens ?? 0)))))
+      })()
+
       // ── 隐藏态：只留一个小胶囊，避免占着屏幕又找不回来 ───────────────────
       if (hidden) {
         return h('div', {
@@ -2158,6 +2285,7 @@ window.__ModuleLoader__.load({
               event.stopPropagation()
               void poll()
               void pollWorkBuddy()
+              void pollBeichen()
             },
           }, busy ? '◌' : '⟳'),
           // 勾选配置：就地展开面板，不弹窗（悬浮层里再套弹窗会被遮住，
@@ -2282,6 +2410,8 @@ window.__ModuleLoader__.load({
         // 统计视图是整块替换，WorkBuddy 分区在这里让位；否则它会挂在统计页
         // 下面，看起来像统计页只铺了一半。
         view === 'stats' || configOpen ? null : wbSection,
+        // 北辰分区同理：统计页与设置面板展开时让位。
+        view === 'stats' || configOpen ? null : beichenSection,
         // 统计视图不显示页脚：它是「几个渠道有余额 / 隐藏了几个」的列表汇总，
         // 放在用量统计页里既不对题，也挤掉了本就不宽的高度。
         collapsed || view === 'stats' ? null : h('div', { style: style.footer },

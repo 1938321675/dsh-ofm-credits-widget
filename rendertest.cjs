@@ -131,6 +131,16 @@ function countRows(tree) {
     && node.props.style.gridTemplateColumns !== undefined).length
 }
 
+/** 北辰分区是否存在。 */
+function hasBeichen(tree) {
+  return flatten(tree).some(node => node.props !== undefined && node.props['data-ofm-credit-watch-beichen'] !== undefined)
+}
+
+/** 北辰分区展开后的明细行数。 */
+function countBeichenRows(tree) {
+  return flatten(tree).filter(node => node.props !== undefined && node.props['data-beichen-row'] !== undefined).length
+}
+
 /** 配置面板是否存在。 */
 function hasConfigPane(tree) {
   return flatten(tree).some(node => node.props !== undefined && node.props['data-ofm-credit-watch-config'] === 'pane')
@@ -160,6 +170,8 @@ const IDX = {
   wbRows: 15, wbLedger: 16, wbConnected: 17, wbOpen: 18, wbLoading: 19,
   // 视图与 token 用量：接在 WorkBuddy 之后。
   view: 20, usage: 21, usageDate: 22, statsSplit: 23, mainSplit: 24,
+  // 北辰 API：声明在所有 useState 之后，下标接在 mainSplit 后面。
+  beichen: 25, beichenOpen: 26,
 }
 
 /** WorkBuddy 分区节点。 */
@@ -183,6 +195,33 @@ function wbRows() {
 // ── 1. 全部可见 ───────────────────────────────────────────────────────────
 check('10 个渠道全可见时渲染 10 行',
   countRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })), 10)
+
+// ── 北辰 API：读数到达后多出一行 ─────────────────────────────────────────
+const beichenReading = {
+  configured: true, ok: true, balance: 0.58, unit: 'USD',
+  today: { date: '2026-11-17', requests: 3, totalTokens: 1_200_000, actualCost: 0.42 },
+  days: [{ date: '2026-11-17', requests: 3, totalTokens: 1_200_000, actualCost: 0.42 }],
+}
+check('北辰读数到达后出现独立分区',
+  hasBeichen(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading })), true)
+
+check('北辰不混进渠道列表',
+  countRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading })), 10)
+
+check('北辰没有读数时不出现分区',
+  hasBeichen(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: null })), false)
+
+check('没配北钥时不出现分区',
+  hasBeichen(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: { configured: false, ok: false, balance: null, days: [] } })), false)
+
+check('折叠时标题栏也显示余额',
+  allText(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading })).includes('$0.58'), true)
+
+check('北辰分区默认折叠只留标题栏',
+  countBeichenRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading })), 0)
+
+check('展开北辰分区后列出明细',
+  countBeichenRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading, [IDX.beichenOpen]: true })), 2)
 
 // ── 2. 隐藏若干渠道后行数下降 ─────────────────────────────────────────────
 check('隐藏 1 个后渲染 9 行',
