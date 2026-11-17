@@ -838,6 +838,8 @@ window.__ModuleLoader__.load({
      * 压力来源。
      */
     const WB_POLL_MS = 5 * 60_000
+    /** 北辰 API 的轮询间隔：一分钟，正好踩在 Host 侧 60 秒缓存边界上。 */
+    const BEICHEN_POLL_MS = 60_000
 
     /** 国内版与国际版是两条并行上游，各自一份账号列表。 */
     const WB_REGIONS = ['cn', 'global']
@@ -1378,14 +1380,12 @@ window.__ModuleLoader__.load({
         }).catch(() => { /* Host 没有 wb 账本路由，等采样时再试 */ })
         void pollWorkBuddy()
         void pollUsage()
-        void pollBeichen()
         let timer
         const start = () => {
           if (timer !== undefined) return
           timer = window.setInterval(() => {
             void pollWorkBuddy()
             void pollUsage()
-            void pollBeichen()
           }, WB_POLL_MS)
         }
         const stop = () => {
@@ -1395,7 +1395,7 @@ window.__ModuleLoader__.load({
         }
         // 与 OFM 轮询同一套可见性规则：看不见的时候不采样。
         const onVisibility = () => {
-          if (document.visibilityState === 'visible') { void pollWorkBuddy(); void pollUsage(); void pollBeichen(); start() } else { stop() }
+          if (document.visibilityState === 'visible') { void pollWorkBuddy(); void pollUsage(); start() } else { stop() }
         }
         start()
         document.addEventListener('visibilitychange', onVisibility)
@@ -1403,7 +1403,32 @@ window.__ModuleLoader__.load({
           stop()
           document.removeEventListener('visibilitychange', onVisibility)
         }
-      }, [pollWorkBuddy, pollUsage, pollBeichen])
+      }, [pollWorkBuddy, pollUsage])
+
+      // 北辰单独一分钟一轮：它跟 WorkBuddy 的五分钟不是同一个来源，
+      // 余额变化也更值得及时看到。可见性规则与上面一致。
+      useEffect(() => {
+        let timer
+        const start = () => {
+          if (timer !== undefined) return
+          timer = window.setInterval(() => { void pollBeichen() }, BEICHEN_POLL_MS)
+        }
+        const stop = () => {
+          if (timer === undefined) return
+          window.clearInterval(timer)
+          timer = undefined
+        }
+        const onVisibility = () => {
+          if (document.visibilityState === 'visible') { void pollBeichen(); start() } else { stop() }
+        }
+        void pollBeichen()
+        start()
+        document.addEventListener('visibilitychange', onVisibility)
+        return () => {
+          stop()
+          document.removeEventListener('visibilitychange', onVisibility)
+        }
+      }, [pollBeichen])
 
       // 每 10 秒走一次"现在"，让"3 分钟前有消耗"这类相对时间自己走字，
       // 而不用为了刷新相对时间重发 RPC。
