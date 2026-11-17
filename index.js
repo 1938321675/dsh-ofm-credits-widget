@@ -432,6 +432,151 @@ function readUsageStats() {
   return value
 }
 
+
+// ── 北辰 API（beichenapi.com）─────────────────────────────────────────────────
+/**
+ * 北辰是中转网关，余额与用量不走 channel-pack：网页 /usage 要登录，网关另
+ * 开了一条只读口子 GET /v1/usage，用 API Key 就能取到余额、当天汇总、按模型
+ * 明细。这里做的是「浏览器做不了」的那一半：Key 在 Host 侧解析，历史按日落在
+ * 本机（接口只回当天，多天趋势得自己攒）。
+ *
+ * 只读查询，不发起推理，因此不产生任何 token 计费。
+ */
+const BEICHEN_USAGE_URL = 'https://api.beichenapi.com/v1/usage'
+const BEICHEN_CACHE_MS = 60_000
+const BEICHEN_KEEP_DAYS = 90
+const BEICHEN_TIMEOUT_MS = 15_000
+let beichenCache = null
+let beichenInFlight = null
+
+function beichenFile() {
+  return path.join(ledgerDir(), 'beichen-days.json')
+}
+
+/** Key 解析：环境变量优先，其次 `~/.dsh/.credentials.yaml` 里的同名条目。 */
+function readBeichenKey() {
+  const env = process.env.BEICHEN_MAIN_API_KEY
+  if (typeof env === 'string' && env.trim() !== '') return env.trim()
+  try {
+    const text = readFileSync(path.join(DSH_HOME, '.credentials.yaml'), 'utf8')
+    const match = text.match(/^\s*BEICHEN_MAIN_API_KEY\s*:\s*['\"]?([^'\"\s#]+)/m)
+    return match === null ? '' : match[1].trim()
+  } catch {
+    return ''
+  }
+}
+
+function readBeichenDays() {
+  try {
+    const raw = JSON.parse(readFileSync(beichenFile(), 'utf8'))
+    if (raw !== null && typeof raw === 'object' && raw.days !== null && typeof raw.days === 'object') return raw
+  } catch { /* 还没有历史是常态 */ }
+  return { days: {} }
+}
+
+function writeBeichenDays(state) {
+  try {
+    mkdirSync(ledgerDir(), { recursive: true })
+    const target = beichenFile()
+    const temp = target + '.' + process.pid + '.tmp'
+    writeFileSync(temp, JSON.stringify(state, null, 2), { mode: 0o600 })
+    renameSync(temp, target)
+  } catch (error) {
+    // 写不进去不该让余额也显示不出来：历史是加分项，读数才是主体。
+  }
+}
+
+function countOf(value) {
+  const n = Number(value)
+  return Number.isFinite(n) && n >= 0 ? n : 0
+}
+
+/** 把接口的一天归一成插件自己的字段名。 */
+function normalizeBeichenDay(row) {
+  if (row === null || typeof row !== 'object') return null
+  const date = typeof row.date === 'string' ? row.date.trim() : ''
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
+  return {
+    date,
+    requests: countOf(row.requests),
+    inputTokens: countOf(row.input_tokens),
+    outputTokens: countOf(row.output_tokens),
+    cacheReadTokens: countOf(row.cache_read_tokens),
+    cacheWriteTokens: countOf(row.cache_write_tokens),
+    totalTokens: countOf(row.total_tokens),
+    cost: countOf(row.cost),
+    actualCost: countOf(row.actual_cost),
+  }
+}
+
+async function fetchBeichen() {
+  const key = readBeichenKey()
+  const days = Object.values(readBeichenDays().days).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+  if (key === '') return { configured: false, ok: false, error: 'no-key', balance: null, unit: 'USD', today: null, days }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), BEICHEN_TIMEOUT_MS)
+  let response
+  try {
+    response = await fetch(BEICHEN_USAGE_URL, {
+      headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' },
+      signal: controller.signal,
+    })
+  } catch (error) {
+    const reason = error?.name === 'AbortError' ? 'timeout' : String(error?.message ?? error)
+    return { configured: true, ok: false, error: reason, balance: null, unit: 'USD', today: null, days }
+  } finally {
+    clearTimeout(timer)
+  }
+  if (!response.ok) return { configured: true, ok: false, error: 'HTTP ' + response.status, balance: null, unit: 'USD', today: null, days }
+  let body
+  try {
+    body = await response.json()
+  } catch (error) {
+    return { configured: true, ok: false, error: String(error?.message ?? error), balance: null, unit: 'USD', today: null, days }
+  }
+  // 每日行写进历史：接口给的是当天累计，按日期覆盖即最新值。
+  const state = readBeichenDays()
+  for (const row of Array.isArray(body?.daily_usage) ? body.daily_usage : []) {
+    const day = normalizeBeichenDay(row)
+    if (day !== null) state.days[day.date] = day
+  }
+  const floor = new Date(Date.now() - BEICHEN_KEEP_DAYS * 86_400_000)
+  const pad = n => String(n).padStart(2, '0')
+  const cutoff = String(floor.getFullYear()) + '-' + pad(floor.getMonth() + 1) + '-' + pad(floor.getDate())
+  for (const key2 of Object.keys(state.days)) if (key2 < cutoff) delete state.days[key2]
+  writeBeichenDays(state)
+  const merged = Object.values(state.days).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+  const todayKey = new Date().toLocaleDateString('sv-SE')
+  const today = merged.find(row => row.date === todayKey) ?? null
+  return {
+    configured: true,
+    ok: true,
+    balance: countOf(body?.balance ?? body?.remaining),
+    unit: 'USD',
+    plan: typeof body?.planName === 'string' ? body.planName : '',
+    mode: typeof body?.mode === 'string' ? body.mode : '',
+    today,
+    days: merged,
+  }
+}
+
+/** 60 秒缓存 + 并发去重：卡片每分钟轮询，不必每次真的打上游。 */
+async function readBeichen(force) {
+  const now = Date.now()
+  if (force !== true && beichenCache !== null && now - beichenCache.at < BEICHEN_CACHE_MS) return beichenCache.value
+  if (beichenInFlight !== null) return beichenInFlight
+  beichenInFlight = (async () => {
+    try {
+      const value = await fetchBeichen()
+      beichenCache = { at: Date.now(), value }
+      return value
+    } finally {
+      beichenInFlight = null
+    }
+  })()
+  return beichenInFlight
+}
+
 // ── HTTP ────────────────────────────────────────────────────────────────────
 
 /**
@@ -508,6 +653,11 @@ async function handleApi(req, res) {
       if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
       return sendJson(res, 200, readUsageStats())
     }
+    // 北辰 API 的余额与按日用量：Host 侧解析 Key、请求上游、留存历史。
+    if (route === '/beichen') {
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
+      return sendJson(res, 200, await readBeichen(url.searchParams.get('force') === '1'))
+    }
     if (route === '/ping') return sendJson(res, 200, { ok: true })
     return sendJson(res, 404, { error: 'not found' })
   } catch (error) {
@@ -539,4 +689,5 @@ export const __test = {
   commitReadings, readLedger, normalizeLast, todayKey, round2, ledgerDir,
   wbKey, readWorkBuddyLedger, commitWorkBuddy, WB_STALE_MS, WB_RESAVE_MS, RESAVE_MS, STALE_MS,
   readUsageStats, usageLedgerFile, OFM_PROVIDERS, WORKBUDDY_PROVIDERS, usageCache,
+  fetchBeichen, readBeichen, readBeichenKey, beichenFile,
 }
