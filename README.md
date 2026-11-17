@@ -26,6 +26,9 @@
 - **可配置显示**：勾选隐藏用不上的渠道，悬浮窗随之变矮；隐藏的渠道降频到 5 分钟一轮
 - **WorkBuddy 账号消耗**：列表下方独立分区，带列头「账号 / 今日 / 余额」，逐账号显示
   当日积分消耗与当前余额；分区头部另给所有账号的今日 token 总量
+- **北辰 API 余额与用量**：列表下方的独立折叠分区，标题栏常驻剩余余额（美元，按告警
+  档位变色）与今日扣费、token 总量，展开看余额、今日 token 与缓存读取；统计界面里
+  跟着日期条翻每天的北辰用量
 - **token 统计界面**：标题栏的统计按钮把整张卡片切换到统计页，按日期查看每日 token 用量
   （输入 + 缓存读 + 输出合成一个数），列出当天有调用的 OFM 渠道、WorkBuddy 合计，
   以及 WorkBuddy 所有账号的累计积分消耗
@@ -73,6 +76,7 @@
 | GET | `/api/ofm-credit-watch/wb` | 读 WorkBuddy 账本（今日 + 累计 + 基准时间） |
 | POST | `/api/ofm-credit-watch/wb` | 报一轮读数 `{ readings: [{key, total}] }`，返回累加后的今日与累计 |
 | GET | `/api/ofm-credit-watch/usage` | 按天汇总的 token 用量（数据取自 cost-meter 账本） |
+| GET | `/api/ofm-credit-watch/beichen` | 北辰 API 的余额与按日用量（Host 侧用 API Key 取数并逐日留存） |
 | GET | `/api/ofm-credit-watch/ping` | 健康检查 |
 
 **为什么差值必须由 Host 算**：同时开两个窗口时，让浏览器各自算差值会把同一笔消耗
@@ -87,6 +91,16 @@
 
 读数与上一轮完全一致时不写盘（内容没变，写下去的还是旧值），最迟 10 分钟强制落一次，
 避免基准时间停住之后每轮都被判成「过旧」。
+
+### 北辰 API 读数
+
+北辰是中转网关，余额与用量都在网关的只读接口 `GET /v1/usage` 上：网页 `/usage` 走登录态，
+这条接口接受 API Key，Host 侧用 `Authorization: Bearer` 直接取。Key 的解析顺序是环境变量
+`BEICHEN_MAIN_API_KEY`、`~/.dsh/.credentials.yaml` 里的同名条目。
+
+请求带 60 秒缓存与并发去重，页面每分钟轮询不会把上游打成压力测试。每次成功取数把当天
+汇总并进 `beichen-days.json`，保留 90 天。这条接口按天返回，多天趋势由此逐日累积：接入
+之前的日期没有记录，统计界面翻到那些天会显示「这一天没有调用记录」。
 
 ### WorkBuddy 账号账本
 
