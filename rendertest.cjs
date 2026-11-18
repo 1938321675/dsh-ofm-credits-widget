@@ -136,6 +136,26 @@ function hasBeichen(tree) {
   return flatten(tree).some(node => node.props !== undefined && node.props['data-ofm-credit-watch-beichen'] !== undefined)
 }
 
+/** GPT 订阅分区是否存在。 */
+function hasCodex(tree) {
+  return flatten(tree).some(node => node.props !== undefined && node.props['data-ofm-credit-watch-codex'] !== undefined)
+}
+
+/** OFM 模型分区是否存在。 */
+function hasOfm(tree) {
+  return flatten(tree).some(node => node.props !== undefined && node.props['data-ofm-credit-watch-ofm'] !== undefined)
+}
+
+/** GPT 分区展开后的明细行数。 */
+function countCodexRows(tree) {
+  return flatten(tree).filter(node => node.props !== undefined && node.props['data-codex-row'] !== undefined).length
+}
+
+/** OFM 分区的渠道行数。 */
+function countOfmRows(tree) {
+  return flatten(tree).filter(node => node.props !== undefined && node.props['data-ofm-token-row'] !== undefined).length
+}
+
 /** 北辰分区展开后的明细行数。 */
 function countBeichenRows(tree) {
   return flatten(tree).filter(node => node.props !== undefined && node.props['data-beichen-row'] !== undefined).length
@@ -170,8 +190,8 @@ const IDX = {
   wbRows: 15, wbLedger: 16, wbConnected: 17, wbOpen: 18, wbLoading: 19,
   // 视图与 token 用量：接在 WorkBuddy 之后。
   view: 20, usage: 21, usageDate: 22, statsSplit: 23, mainSplit: 24,
-  // 北辰 API：声明在所有 useState 之后，下标接在 mainSplit 后面。
-  beichen: 25, beichenOpen: 26,
+  // 北辰 API 及后续大栏：声明在所有 useState 之后，下标依次排开。
+  beichen: 25, codex: 26, ofmTokens: 27, hiddenSections: 28, codexOpen: 29, beichenOpen: 30,
 }
 
 /** WorkBuddy 分区节点。 */
@@ -213,6 +233,47 @@ check('北辰没有读数时不出现分区',
 
 check('没配北钥时不出现分区',
   hasBeichen(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: { configured: false, ok: false, balance: null, days: [] } })), false)
+
+const codexReading = {
+  available: true,
+  windows: [
+    { kind: 'fiveHour', remainingPercent: 63, resetsAt: 1794980149000, sampledAt: 1794969184707 },
+    { kind: 'weekly', remainingPercent: 94, resetsAt: 1795566949000, sampledAt: 1794969184707 },
+  ],
+}
+const ofmReading = {
+  available: true, day: '2026-11-18',
+  channels: [
+    { channel: 'qodercn', calls: 52, input: 9000000, output: 300000, cacheRead: 2000000 },
+    { channel: 'loomy', calls: 18, input: 700000, output: 20000, cacheRead: 160000 },
+  ],
+  total: { input: 9700000, output: 320000, cacheRead: 2160000, calls: 70 },
+}
+
+check('GPT 订阅读数到达后出现分区',
+  hasCodex(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.codex]: codexReading })), true)
+
+check('GPT 分区默认折叠只留标题栏',
+  countCodexRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.codex]: codexReading })), 0)
+
+check('展开 GPT 分区后两行限额',
+  countCodexRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.codex]: codexReading, [IDX.codexOpen]: true })), 2)
+
+check('隐藏 GPT 栏后分区不渲染',
+  hasCodex(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.codex]: codexReading, [IDX.hiddenSections]: new Set(['codex']) })), false)
+
+check('OFM 读数到达后出现分区并列出渠道',
+  hasOfm(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.ofmTokens]: ofmReading }))
+  && countOfmRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.ofmTokens]: ofmReading })) === 2, true)
+
+check('隐藏 OFM 栏后分区不渲染',
+  hasOfm(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.ofmTokens]: ofmReading, [IDX.hiddenSections]: new Set(['ofm']) })), false)
+
+check('隐藏 WorkBuddy 栏后分区不渲染',
+  (() => {
+    const tree = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.hiddenSections]: new Set(['workbuddy']) })
+    return flatten(tree).some(node => node.props !== undefined && node.props['data-ofm-credit-watch-wb'] !== undefined) === false
+  })(), true)
 
 check('折叠时标题栏也显示余额',
   allText(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading })).includes('$0.58'), true)
@@ -258,8 +319,15 @@ check('收起时不显示配置面板',
     node.props !== undefined
     && node.type === 'input'
     && node.props.type === 'checkbox')
-  check('配置面板列出全部 10 个渠道（即使全被隐藏）', options.length, 10)
-  check('全隐藏时所有勾选框都未选中', options.every(option => option.props.checked === false), true)
+  // 渠道勾选框挂在自己的 label 上（data-channel），大栏开关挂在 data-section 上；
+  // 只数前者，与「全部隐藏」的语义对应。
+  const channelLabels = flatten(tree).filter(node =>
+    node.props !== undefined && node.props['data-channel'] !== undefined)
+  const channelCheckboxIds = new Set(channelLabels.map(label =>
+    (label.children || []).find(child => child?.props?.type === 'checkbox')))
+  const channelOptions = options.filter(option => channelCheckboxIds.has(option))
+  check('配置面板列出全部 10 个渠道（即使全被隐藏）', channelOptions.length, 10)
+  check('全隐藏时所有渠道勾选框都未选中', channelOptions.every(option => option.props.checked === false), true)
 }
 
 // ── 4b. WorkBuddy 分区 ────────────────────────────────────────────────────
