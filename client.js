@@ -1978,6 +1978,17 @@ window.__ModuleLoader__.load({
           display: 'flex', alignItems: 'center', gap: 7, padding: '4px 10px',
           cursor: 'pointer', fontSize: 11.5,
         },
+        optionButton: {
+          display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+          padding: '4px 10px', border: 'none', background: 'transparent',
+          color: 'inherit', font: 'inherit', textAlign: 'left', cursor: 'pointer',
+        },
+        fakeBox: {
+          width: 13, height: 13, flex: '0 0 auto', borderRadius: 3,
+          display: 'grid', placeItems: 'center', fontSize: 10, lineHeight: 1,
+          border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.45))',
+          background: 'transparent', color: 'var(--dsw-alias-brand-primary, #4b7bec)',
+        },
         checkbox: { width: 13, height: 13, margin: 0, cursor: 'pointer', accentColor: 'var(--dsw-alias-brand-primary, #4b7bec)' },
         optionName: { flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
         optionAmount: {
@@ -2139,20 +2150,22 @@ window.__ModuleLoader__.load({
         }),
         // 大栏开关：整块分区（北辰 / GPT 订阅 / OFM 模型 / WorkBuddy）的显示与否。
         h('div', { style: { ...style.configHint, marginTop: 10 } }, t('sectionsHint')),
-        [['beichen', 'sectionBeichen'], ['codex', 'sectionCodex'], ['ofm', 'sectionOfm'], ['workbuddy', 'sectionWb']].map(([key, labelKey]) =>
-          h('label', { key, style: style.option, 'data-section': key, 'data-checked': hiddenSections.has(key) ? 'false' : 'true' },
-            h('input', {
-              type: 'checkbox', style: style.checkbox,
-              checked: !hiddenSections.has(key),
-              // 点击事件挂在 label 上统一处理：input 的原生行为在这里会造成
-              // 「onChange 触发后浏览器再经 label 派发一次」，勾选状态被来回
-              // 翻转，表现为“点不动”。preventDefault 掉原生切换，只走我们的
-              // onChange 一条路。
-              onClick: event => event.preventDefault(),
-              onChange: () => persistHiddenSections(toggleHiddenSections(hiddenSections, key)),
-            }),
+        // 整行是一个 button：切换由 onClick 直接完成，勾选框只做展示。
+        // 这条路不经过 label→input 的原生转发，也不依赖原生 change 事件，
+        // 因此不受受控 checkbox 的任何浏览器差异影响。
+        [['beichen', 'sectionBeichen'], ['codex', 'sectionCodex'], ['ofm', 'sectionOfm'], ['workbuddy', 'sectionWb']].map(([key, labelKey]) => {
+          const visible = !hiddenSections.has(key)
+          return h('button', {
+            key, type: 'button',
+            style: { ...style.optionButton, opacity: visible ? 1 : 0.55 },
+            'data-section': key, 'data-checked': visible ? 'true' : 'false',
+            'aria-pressed': visible ? 'true' : 'false',
+            onClick: () => persistHiddenSections(toggleHiddenSections(hiddenSections, key)),
+          },
+            h('span', { style: { ...style.fakeBox, 'data-on': visible ? 'true' : 'false' } }, visible ? '✓' : ''),
             h('span', { style: { width: 3, height: 14, borderRadius: 2, background: '#4C8DFF', flex: '0 0 auto' } }),
-            h('span', { style: style.optionName }, t(labelKey)))),
+            h('span', { style: style.optionName }, t(labelKey)))
+        }),
         h('div', { style: style.configActions },
           h('button', {
             type: 'button', style: style.pill,

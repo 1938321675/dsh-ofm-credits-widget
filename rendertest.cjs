@@ -280,6 +280,41 @@ check('隐藏 WorkBuddy 栏后分区不渲染',
     return flatten(tree).some(node => node.props !== undefined && node.props['data-ofm-credit-watch-wb'] !== undefined) === false
   })(), true)
 
+// ── 大栏开关：真正调用一次 onChange，确认状态翻转链路通 ──────────────
+// 只检查「有 onChange」不够：上一版把 persist 函数放在组件外引用了
+// 不存在的 setter，渲染树完全正常，点下去才抛 ReferenceError。
+check('四个大栏开关都是可点的按钮', (() => {
+  const tree = render({ [IDX.configOpen]: true, [IDX.hiddenSections]: new Set() })
+  const buttons = flatten(tree).filter(n => n.props !== undefined && n.props['data-section'] !== undefined)
+  return buttons.length === 4 && buttons.every(b => b.type === 'button' && typeof b.props.onClick === 'function')
+})(), true)
+
+check('点击大栏开关写入隐藏集合并使分区消失', (() => {
+  const store = new Map()
+  const saved = global.window.localStorage
+  global.window.localStorage = {
+    getItem: k => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+  }
+  try {
+    const ofmReading = {
+      available: true, day: '2026-11-18',
+      channels: [{ channel: 'qodercn', calls: 5, input: 100, output: 10, cacheRead: 50 }],
+      total: { input: 100, output: 10, cacheRead: 50, calls: 5 },
+    }
+    const before = render({ [IDX.configOpen]: true, [IDX.hiddenSections]: new Set(), [IDX.ofmTokens]: ofmReading })
+    const button = flatten(before).find(n => n.props !== undefined && n.props['data-section'] === 'ofm')
+    button.props.onClick({ stopPropagation() {} })
+    const written = JSON.parse(store.get('ofm-credit-watch.hiddenSections') ?? 'null')
+    if (!Array.isArray(written) || !written.includes('ofm')) return false
+    // 用写盘结果重渲染：OFM 分区应当消失，WorkBuddy 仍在
+    const after = render({ [IDX.hiddenSections]: new Set(written), [IDX.ofmTokens]: ofmReading })
+    const hasOfm = flatten(after).some(n => n.props !== undefined && n.props['data-ofm-credit-watch-ofm'] !== undefined)
+    const hasWb = flatten(after).some(n => n.props !== undefined && n.props['data-ofm-credit-watch-wb'] !== undefined)
+    return hasOfm === false && hasWb === true
+  } catch { return false } finally { global.window.localStorage = saved }
+})(), true)
+
 check('折叠时标题栏也显示余额',
   allText(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading })).includes('$0.58'), true)
 
