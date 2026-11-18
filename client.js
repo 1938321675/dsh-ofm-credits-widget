@@ -1756,75 +1756,15 @@ window.__ModuleLoader__.load({
         },
       })
 
-      // 主界面：渠道列表高度。拖动期间只更新界面，松手才落盘。
-      const mainSplitHandlers = makeSplitHandlers({
-        listSelector: '[data-main-list]',
-        // 拖动开始前把卡片高度固化：卡片是 height: auto 时，纵向 flex 没有
-        // 可分配的空间，拖矮上面只会把内容挤上去，横线不会动。
-        onStart: () => {
-          if (size.height !== null) return
-          const panel = typeof document?.querySelector === 'function'
-            ? document.querySelector('[data-ofm-credit-watch="panel"]')
-            : null
-          const measured = panel === null || panel === undefined ? 0 : Math.round(panel.offsetHeight)
-          if (measured <= 0) return
-          persistSize(
-            { width: size.width, height: measured },
-            { left: leftOf(pos, window.innerWidth, size.width), top: pos.top },
-          )
-        },
-        onChange: setMainSplit,
-        onCommit: () => setMainSplit(current => {
-          if (current !== null) saveMainSplit(current)
-          return current
-        }),
-        onReset: () => {
-          setMainSplit(null)
-          try { window.localStorage?.removeItem(MAIN_SPLIT_KEY) } catch { /* 存储不可用 */ }
-        },
-      })
-
-      // ── 排序与汇总 ───────────────────────────────────────────────────────
-      // 只有被勾选显示的渠道才参与列表渲染与排序；数据仍然全部采集，
-      // 因此勾回来立刻有数字。
-      const visibleRows = useMemo(
-        () => rows.filter(row => !hiddenIds.has(row.id)),
-        [rows, hiddenIds])
-
-      // 活跃优先：最近一次出现消耗距现在越近越靠前（IDLE_WINDOW_MS 内算活跃）；
-      // 都不活跃时按剩余积分从多到少，让"还有多少可用"一眼可见。
-      const ordered = useMemo(() => {
-        const rank = row => {
-          const at = lastSpent[row.id]
-          if (!Number.isFinite(at)) return Number.POSITIVE_INFINITY
-          const age = now - at
-          return age <= IDLE_WINDOW_MS ? age : Number.POSITIVE_INFINITY
-        }
-        return [...visibleRows].sort((left, right) => {
-          const ra = rank(left)
-          const rb = rank(right)
-          if (ra !== rb) return ra - rb
-          const ta = Number.isFinite(left.total) ? left.total : -1
-          const tb = Number.isFinite(right.total) ? right.total : -1
-          if (ta !== tb) return tb - ta
-          return left.name.localeCompare(right.name)
-        })
-      }, [visibleRows, lastSpent, now])
-
-      // 合计与"有余额的渠道数"也跟着可见性走：隐藏了 TRAE 之后，
-      // 页脚的合计若还算着它，数字就和列表对不上了。
+      // 隐藏态小胶囊上那个总数：所有有余额的渠道合计。
       const total = useMemo(() => {
         let sum = 0
         let seen = false
-        for (const row of visibleRows) {
+        for (const row of rows) {
           if (Number.isFinite(row.total)) { sum += row.total; seen = true }
         }
         return seen ? sum : null
-      }, [visibleRows])
-
-      const channelCount = visibleRows.filter(row => Number.isFinite(row.total)).length
-      const failedCount = visibleRows.filter(row => row.ok === false).length
-      const hiddenCount = rows.length - visibleRows.length
+      }, [rows])
 
       // 标题栏的转圈：两套上游任一在刷新就转，用户按一次钮能看到它确实动了。
       const busy = loading || wbLoading
@@ -1915,22 +1855,6 @@ window.__ModuleLoader__.load({
           : size.height === null || collapsed
             ? { maxHeight: 320, overflowY: 'auto', padding: '4px 0 6px' }
             : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '4px 0 6px' },
-        // 主界面渠道列表：没拖过横条时随内容长。
-        //
-        // 拖过之后按「固定高度」参与 flex 分配：拖动就是在改这块的高度。
-        // 但 flexShrink 必须是 0，且 minHeight 用 min-content——否则往上拖时
-        // 浏览器会先把行压扁（行没有 min-height），内容被挤成一条条，
-        // 而横线还停在原处，看起来就是"拖了没反应"。
-        mainListAuto: {},
-        // 下限由拖动逻辑用实测内容高度保证（见 makeSplitHandlers）：
-        // overflow: auto 的元素 min-content 会被算成 0，样式里兜不住。
-        mainList: { overflowY: 'auto', flexShrink: 0 },
-        // 主界面分隔条：与统计界面那条同一手感，抓取区 7px。
-        mainSplitter: {
-          height: 7, margin: '1px 0', cursor: 'row-resize', touchAction: 'none', flexShrink: 0,
-          borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))',
-          background: 'transparent',
-        },
         // 四列：色条 / 名称 / 本分钟消耗 / 余额（余额下方叠当日累计）。
         // 消耗与余额分成两列，数字不再挤在同一格里——量级差很大时
         // （1352 余额 vs −1.0 消耗）挤在一列会读成一串。
@@ -2126,30 +2050,10 @@ window.__ModuleLoader__.load({
       // ── 设置面板 ────────────────────────────────────────────────────────
       // 与统计页同一层级：整块独占 body。勾选表本身就是「哪些渠道要显示」的
       // 清单，上面再压一份渠道列表，等于同一批渠道在一屏里出现两次。
+      // 设置面板只保留大栏开关：渠道列表已移除，逐渠道勾选失去意义——
+      // 单个渠道的余额与用量都收在「OFM 模型」栏里。
       const configPane = h('div', { style: style.configPane, 'data-ofm-credit-watch-config': 'pane' },
-        h('div', { style: style.configHint }, t('settingsHint')),
-        CHANNELS.map(channel => {
-          const row = rows.find(item => item.id === channel.id)
-          const checked = !hiddenIds.has(channel.id)
-          return h('label', {
-            key: channel.id, style: style.option,
-            'data-channel': channel.id, 'data-checked': checked ? 'true' : 'false',
-          },
-            h('input', {
-              type: 'checkbox', style: style.checkbox, checked,
-              onChange: () => persistHidden(toggleHidden(hiddenIds, channel.id)),
-            }),
-            h('span', { style: { width: 3, height: 14, borderRadius: 2, background: channel.accent, flex: '0 0 auto' } }),
-            h('span', { style: style.optionName }, channel.name),
-            h('span', { style: style.optionAmount },
-              row === undefined
-                ? '—'
-                : Number.isFinite(row.total)
-                  ? formatAmount(row.total, row.unit ?? 'credits')
-                  : (row.ok === false ? t('failed') : t('noData'))))
-        }),
-        // 大栏开关：整块分区（北辰 / GPT 订阅 / OFM 模型 / WorkBuddy）的显示与否。
-        h('div', { style: { ...style.configHint, marginTop: 10 } }, t('sectionsHint')),
+        h('div', { style: style.configHint }, t('sectionsHint')),
         // 整行是一个 button：切换由 onClick 直接完成，勾选框只做展示。
         // 这条路不经过 label→input 的原生转发，也不依赖原生 change 事件，
         // 因此不受受控 checkbox 的任何浏览器差异影响。
@@ -2160,21 +2064,22 @@ window.__ModuleLoader__.load({
             style: { ...style.optionButton, opacity: visible ? 1 : 0.55 },
             'data-section': key, 'data-checked': visible ? 'true' : 'false',
             'aria-pressed': visible ? 'true' : 'false',
-            onClick: () => persistHiddenSections(toggleHiddenSections(hiddenSections, key)),
+            // 函数式更新：不读闭包里的 hiddenSections。宿主对 occupant 的渲染
+            // 有缓存时，闭包可能停留在旧一轮渲染，用旧集合取反会让每次点击
+            // 都晚一拍生效（勾 A 不动、勾 B 时 A 才生效）。
+            onClick: () => setHiddenSections(previous => {
+              const next = new Set(previous)
+              if (next.has(key)) next.delete(key)
+              else next.add(key)
+              try { window.localStorage?.setItem(HIDDEN_SECTIONS_KEY, JSON.stringify([...next])) } catch { /* 存储不可用 */ }
+              return next
+            }),
           },
             h('span', { style: { ...style.fakeBox, 'data-on': visible ? 'true' : 'false' } }, visible ? '✓' : ''),
             h('span', { style: { width: 3, height: 14, borderRadius: 2, background: '#4C8DFF', flex: '0 0 auto' } }),
             h('span', { style: style.optionName }, t(labelKey)))
         }),
         h('div', { style: style.configActions },
-          h('button', {
-            type: 'button', style: style.pill,
-            onClick: () => persistHidden(new Set(CHANNELS.map(channel => channel.id))),
-          }, t('hideAll')),
-          h('button', {
-            type: 'button', style: style.pill,
-            onClick: () => persistHidden(new Set()),
-          }, t('showAll')),
           h('button', {
             type: 'button', style: { ...style.pill, marginLeft: 'auto' },
             onClick: () => setConfigOpen(false),
@@ -2450,14 +2355,24 @@ window.__ModuleLoader__.load({
       // cost-meter 账本里 OFM 各渠道的今日 token。折叠栏给合计，展开逐渠道列。
       const ofmChannelRows = Array.isArray(ofmTokens?.channels)
         ? ofmTokens.channels.filter(row => row.calls > 0 || (row.input + row.output + row.cacheRead) > 0)
-          .map(row => ({
-            ...row,
-            // 显示名与今日积分消耗都来自旧渠道行的数据源：合并进大栏后
-            // 渠道列表里那两处就不再重复显示。
-            name: CHANNELS.find(c => c.id === row.channel)?.name ?? row.channel,
-            accent: CHANNELS.find(c => c.id === row.channel)?.accent ?? '#4C8DFF',
-            spent: Number.isFinite(today[row.channel]) ? today[row.channel] : null,
-          })) : []
+          .map(row => {
+            // 余额与账号数来自渠道读数（原渠道列表的数据源）；显示名与
+            // 色条来自 CHANNELS 静态表。渠道列表删除后，这些信息都在这
+            // 一栏里呈现。
+            const live = rows.find(item => item.id === row.channel)
+            const meta = CHANNELS.find(c => c.id === row.channel)
+            const unit = live?.unit ?? 'credits'
+            return {
+              ...row,
+              name: live?.name ?? meta?.name ?? row.channel,
+              accent: live?.accent ?? meta?.accent ?? '#4C8DFF',
+              spent: Number.isFinite(today[row.channel]) ? today[row.channel] : null,
+              balance: Number.isFinite(live?.total) ? live.total : null,
+              unit,
+              accounts: live?.accounts ?? 0,
+              ok: live?.ok !== false,
+            }
+          }) : []
       const ofmTotalTokens = ofmTokens?.total === null || ofmTokens?.total === undefined ? null
         : (ofmTokens.total.input + ofmTokens.total.output + ofmTokens.total.cacheRead)
       const ofmSection = ofmTokens === null || ofmTokens.available === false || hiddenSections.has('ofm') ? null
@@ -2490,7 +2405,10 @@ window.__ModuleLoader__.load({
                     : 'var(--dsw-alias-label-secondary, #888)',
                 },
               }, row.spent !== null && row.spent > 0 ? `−${formatAmount(row.spent, 'credits')}` : '·'),
-              h('span', { style: style.wbAmount }, formatTokens(row.input + row.output + row.cacheRead)))))
+              h('span', { style: style.numbers },
+                h('span', { style: { ...style.amount, color: TONE[toneOf(row.balance, row.unit)], opacity: row.ok ? 1 : 0.5 } },
+                  formatAmount(row.balance, row.unit)),
+                h('span', { style: style.today }, formatTokens(row.input + row.output + row.cacheRead))))))
 
       // ── 隐藏态：只留一个小胶囊，避免占着屏幕又找不回来 ───────────────────
       if (hidden) {
@@ -2597,99 +2515,11 @@ window.__ModuleLoader__.load({
           // 设置视图：同样整块独占。勾选表本身就是「哪些渠道要显示」的清单，
           // 上面再压一份渠道列表，等于同一批渠道在一屏里出现两次。
           : configOpen ? configPane
-          // 列表视图：渠道列表包进可调高的容器，中间的横条拖它改高度。
-          : h('div', {
-            // 拖过分隔条后按固定高度参与上下分配；minHeight 在样式里兜底，
-            // 拖到比内容还矮就停住，不会把行压扁。
-            // 设置面板展开时不按拖出来的高度定死，让列表回到随内容。
-            style: mainSplit === null || configOpen ? style.mainListAuto : { ...style.mainList, height: mainSplit },
-            'data-main-list': 'true',
-          },
-          rows.length === 0
-            ? h('div', { style: style.empty }, error !== '' ? error : t('never'))
-            : ordered.length === 0
-              // 全部被隐藏：给出回程路径，而不是留一片空白让人以为坏了。
-              ? h('div', { style: style.empty }, t('allHidden'))
-              : (ordered.map(row => {
-              const spentAt = lastSpent[row.id]
-              const active = Number.isFinite(spentAt) && (now - spentAt) <= IDLE_WINDOW_MS
-              const todayUsed = today[row.id]
-              const unit = row.unit ?? 'credits'
-              // 本渠道今日的 token 与积分消耗已并入下方「OFM 模型」大栏：
-              // 渠道行只留余额，两套口径不再挤在同一屏。
-              // 副标题优先报问题，其次报账号数与最近消耗时间——一行放不下三件事。
-              const status = row.ok === false
-                ? t('failed')
-                : !Number.isFinite(row.total)
-                  ? (row.accounts === 0 ? t('noAccounts') : t('noData'))
-                  : active
-                    ? (() => {
-                      const phrase = span(now - spentAt)
-                      return phrase === '' ? t('spentJustNow') : fill(t('spentAgo'), { when: phrase })
-                    })()
-                    : row.accounts > 1 ? fill(t('accounts'), { count: row.accounts }) : ''
-              return h('div', {
-                key: row.id, style: style.row,
-                'data-channel': row.id, 'data-active': active ? 'true' : 'false',
-                'data-tone': toneOf(row.total, unit),
-              },
-                h('span', { style: { ...style.stripe, background: row.ok === false ? 'var(--dsw-alias-state-idle-primary, #bbb)' : row.accent } }),
-                h('span', { style: style.nameCell },
-                  h('span', { style: { ...style.name, opacity: row.ok === false ? 0.6 : 1 } }, row.name),
-                  status === '' ? null : h('span', { style: style.meta }, status)),
-                // 今日积分消耗：与下方 WorkBuddy 账号的「今日」列对齐，
-                // 一行一个口径——"今天花了多少积分"。
-                h('span', {
-                  style: {
-                    ...style.spendCell,
-                    color: Number.isFinite(todayUsed) && todayUsed > 0
-                      ? 'var(--dsw-alias-state-warn-primary, #d97706)'
-                      : 'var(--dsw-alias-label-secondary, #888)',
-                  },
-                }, Number.isFinite(todayUsed) && todayUsed > 0 ? `−${formatAmount(todayUsed, unit)}` : '·'),
-                h('span', { style: style.numbers, title: tooltipOf(row) },
-                  h('span', {
-                    style: {
-                      ...style.amount,
-                      color: TONE[toneOf(row.total, unit)],
-                      opacity: Number.isFinite(row.total) ? 1 : 0.45,
-                    },
-                  }, formatAmount(row.total, unit)),
-                  // 今日 token 已迁往「OFM 模型」大栏。
-                  ))
-            }))),
-          ),
-        // 主界面分隔条：上下拖动改渠道列表高度，双击复位。
-        // 统计视图或设置面板展开时不出现——那两种情况下上半区不是列表。
-        view === 'stats' || configOpen ? null : h('div', {
-          key: '__split',
-          style: style.mainSplitter,
-          'data-main-splitter': 'true',
-          title: t('mainSplitHint'),
-          ...mainSplitHandlers,
-        }),
-        // WorkBuddy 分区放在渠道列表之后：它是另一套上游，视觉上与上面隔开，
-        // 但共用同一个滚动区，不额外占用卡片高度。
-        //
-        // 设置面板展开时让位：勾选表是"就地展开"的操作区，它上面不该再压
-        // 一段与勾选无关的内容，否则设置一打开就得先往下滚。
-        // 统计视图是整块替换，WorkBuddy 分区在这里让位；否则它会挂在统计页
-        // 下面，看起来像统计页只铺了一半。
-        // 四个大栏：北辰 → GPT 订阅 → OFM 模型 → WorkBuddy，各自可在设置面板隐藏。
-        view === 'stats' || configOpen ? null : beichenSection,
-        view === 'stats' || configOpen ? null : codexSection,
-        view === 'stats' || configOpen ? null : ofmSection,
-        view === 'stats' || configOpen || hiddenSections.has('workbuddy') ? null : wbSection,
-        // 统计视图不显示页脚：它是「几个渠道有余额 / 隐藏了几个」的列表汇总，
-        // 放在用量统计页里既不对题，也挤掉了本就不宽的高度。
-        collapsed || view === 'stats' ? null : h('div', { style: style.footer },
-          h('span', null, rows.length === 0
-            ? t('never')
-            : total === null ? t('never') : fill(t('summary'), { channels: channelCount, total: kilo(total) })),
-          h('span', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-            // 有隐藏项时明说一句，免得"渠道怎么变少了"看起来像故障。
-            hiddenCount > 0 ? h('span', null, fill(t('hiddenCount'), { count: hiddenCount })) : null,
-            failedCount > 0 ? h('span', { style: { color: 'var(--dsw-alias-state-error-primary, #d33)' } }, `⚠ ${failedCount}`) : null)),
+          // 列表视图：四个大栏依次排开。渠道列表、主分隔条与页脚已移除——
+          // 余额、今日消耗、token 三者都收进「OFM 模型」栏，主界面不再有
+          // 第二份渠道数据，也就没有需要拖高矮的列表了。
+          : [beichenSection, codexSection, ofmSection,
+            hiddenSections.has('workbuddy') ? null : wbSection]),
         // 八向缩放热区。绝对定位，不占列表的流；平时透明，鼠标贴到边上才透出
         // 提示色——像 Windows 窗口的边框。角和边的提示语不同：角能同时改宽高。
         ...HANDLES.map(dir => h('div', {

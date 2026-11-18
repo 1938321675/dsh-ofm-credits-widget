@@ -212,10 +212,6 @@ function wbRows() {
   ]
 }
 
-// ── 1. 全部可见 ───────────────────────────────────────────────────────────
-check('10 个渠道全可见时渲染 10 行',
-  countRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })), 10)
-
 // ── 北辰 API：读数到达后多出一行 ─────────────────────────────────────────
 const beichenReading = {
   configured: true, ok: true, balance: 0.58, unit: 'USD',
@@ -225,8 +221,8 @@ const beichenReading = {
 check('北辰读数到达后出现独立分区',
   hasBeichen(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading })), true)
 
-check('北辰不混进渠道列表',
-  countRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading })), 10)
+check('渠道列表已移除，界面上没有渠道行',
+  countRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading })), 0)
 
 check('北辰没有读数时不出现分区',
   hasBeichen(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: null })), false)
@@ -324,22 +320,6 @@ check('北辰分区默认折叠只留标题栏',
 check('展开北辰分区后列出明细',
   countBeichenRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading, [IDX.beichenOpen]: true })), 2)
 
-// ── 2. 隐藏若干渠道后行数下降 ─────────────────────────────────────────────
-check('隐藏 1 个后渲染 9 行',
-  countRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(['trae']) })), 9)
-
-check('隐藏 3 个后渲染 7 行',
-  countRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(['trae', 'cline', 'qoder']) })), 7)
-
-const allIds = t.CHANNELS.map(channel => channel.id)
-check('全部隐藏时渲染 0 行',
-  countRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(allIds) })), 0)
-
-// 隐藏一个不存在的 id 不应影响行数（normalizeHidden 已经挡过一次，
-// 但状态里若混进脏数据，渲染也不能掉行）。
-check('隐藏未知 id 不影响行数',
-  countRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(['not-a-channel']) })), 10)
-
 // ── 3. 配置面板开关 ───────────────────────────────────────────────────────
 check('默认不显示配置面板',
   hasConfigPane(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })), false)
@@ -350,25 +330,6 @@ check('configOpen 为 true 时显示配置面板',
 // 收起状态下即使 configOpen 也不显示（面板挂在 collapsed 判断之下）。
 check('收起时不显示配置面板',
   hasConfigPane(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.configOpen]: true, [IDX.collapsed]: true })), false)
-
-// ── 4. 配置面板列出全部渠道（含已隐藏的）─────────────────────────────────
-// 否则一旦隐藏就无法再勾回来。
-{
-  const tree = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(allIds), [IDX.configOpen]: true })
-  const options = flatten(tree).filter(node =>
-    node.props !== undefined
-    && node.type === 'input'
-    && node.props.type === 'checkbox')
-  // 渠道勾选框挂在自己的 label 上（data-channel），大栏开关挂在 data-section 上；
-  // 只数前者，与「全部隐藏」的语义对应。
-  const channelLabels = flatten(tree).filter(node =>
-    node.props !== undefined && node.props['data-channel'] !== undefined)
-  const channelCheckboxIds = new Set(channelLabels.map(label =>
-    (label.children || []).find(child => child?.props?.type === 'checkbox')))
-  const channelOptions = options.filter(option => channelCheckboxIds.has(option))
-  check('配置面板列出全部 10 个渠道（即使全被隐藏）', channelOptions.length, 10)
-  check('全隐藏时所有渠道勾选框都未选中', channelOptions.every(option => option.props.checked === false), true)
-}
 
 // ── 4b. WorkBuddy 分区 ────────────────────────────────────────────────────
 // 未连接时给一句说明；连上但收起时只有头部；展开才逐账号列。
@@ -430,7 +391,7 @@ check('收起时不显示配置面板',
 
   // 隐藏 OFM 渠道不影响 WorkBuddy 分区——两套上游互不牵连。
   const allHiddenOfm = render({
-    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(allIds),
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(fullRows().map(row => row.id)),
     [IDX.wbRows]: wbRows(), [IDX.wbOpen]: true,
   })
   check('OFM 渠道全隐藏时 WorkingBuddy 行仍在', countWbRows(allHiddenOfm), 3)
@@ -460,11 +421,7 @@ check('收起时不显示配置面板',
     },
   })
   const usageTexts = allText(withUsage).join(' ')
-  // 100 + 900 + 0 = 1000，走 kilo 原样显示（一万以下不缩写）。
-  // 小字只有一个数字，不带「token」这种字样——列的语义靠位置自明。
-  check('渠道行显示今日 token', usageTexts.includes('1000'), true)
-  check('渠道行不带 token 字样', usageTexts.includes('token'), false)
-
+  // 渠道行已随旧列表移除；今日 token 现在只出现在「OFM 模型」大栏。
   const noUsage = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.usage]: { available: false, days: [] } })
   const noUsageTexts = allText(noUsage).join(' ')
   check('没有用量数据时不显示 token 小字', noUsageTexts.includes('token'), false)
@@ -485,9 +442,8 @@ check('收起时不显示配置面板',
 
   // 统计视图下不该再出现渠道列表行——它是整块替换。
   check('统计视图不渲染渠道列表', countRows(stats), 0)
-  // 页脚是「几个渠道有余额 / 隐藏了几个」的列表汇总，统计页里不对题。
+  // 页脚已随旧列表移除，统计视图与列表视图都不再有它。
   check('统计视图不渲染页脚', allText(stats).join(' ').includes('个渠道有余额'), false)
-  check('列表视图有页脚', allText(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })).join(' ').includes('个渠道有余额'), true)
   // WorkBuddy 分区与设置面板同理：它们挂在 body 的其它位置，
   // 只换列表会让统计页看起来只铺了上半部分。
   check('统计视图不渲染 WorkBuddy 分区', wbSectionOf(stats) === undefined, true)
@@ -514,149 +470,6 @@ check('收起时不显示配置面板',
   // 空账本：同样是空状态。
   const emptyStats = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats', [IDX.usage]: { available: true, days: [] } })
   check('没有数据时显示空状态', statsOf(emptyStats)?.props['data-ofm-credit-watch-stats'], 'empty')
-}
-
-// ── 4d. 主界面的分隔条 ────────────────────────────────────────────────────
-{
-  const mainSplitterOf = tree => flatten(tree).find(n => n.props !== undefined && n.props['data-main-splitter'] === 'true')
-  const mainListOf = tree => flatten(tree).find(n => n.props !== undefined && n.props['data-main-list'] === 'true')
-
-  const list = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })
-  check('列表视图有主界面分隔条', mainSplitterOf(list) !== undefined, true)
-  check('主界面分隔条用上下拖动光标', mainSplitterOf(list)?.props.style?.cursor, 'row-resize')
-  check('没拖过时渠道列表没有固定高度', mainListOf(list)?.props.style?.height, undefined)
-
-  const sized = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.mainSplit]: 180 })
-  // 拖过之后按固定高度参与上下分配：拖动就是在改这块的高度。
-  check('拖过之后渠道列表带固定高度', mainListOf(sized)?.props.style?.height, 180)
-  // 不被压扁：往上拖时浏览器不得把行挤扁（否则横线不动、内容反而变细）。
-  check('渠道列表不参与压缩', mainListOf(sized)?.props.style?.flexShrink, 0)
-  // 下限不靠样式（overflow:auto 的 min-content 算出来是 0），
-  // 而是拖动时用实测 scrollHeight 夹取，见下方拖动链路用例。
-  check('渠道列表超出时自己滚', mainListOf(sized)?.props.style?.overflowY, 'auto')
-
-  // body 在拖过之后变成纵向 flex：上下两块在里面真正分配高度。
-  const bodyOf = tree => flatten(tree).find(n => n.props !== undefined
-    && n.props.style !== undefined && n.props.style.padding === '4px 0 6px')
-  check('没拖过时 body 限制高度', bodyOf(list)?.props.style?.maxHeight, 320)
-  check('拖过之后 body 放开高度限制', bodyOf(sized)?.props.style?.maxHeight, undefined)
-  check('拖过之后 body 是纵向 flex', bodyOf(sized)?.props.style?.display, 'flex')
-  check('拖过之后 body 纵向排列', bodyOf(sized)?.props.style?.flexDirection, 'column')
-
-  // 下半区吃剩余高度，横线才会跟着手走。
-  const wbOf = tree => flatten(tree).find(n => n.props !== undefined && n.props['data-ofm-credit-watch-wb'] === 'section')
-  check('拖过之后 WorkBuddy 分区吃剩余高度', wbOf(sized)?.props.style?.flex, '1 1 auto')
-  check('没拖过时 WorkBuddy 分区随内容', wbOf(list)?.props.style?.flex, undefined)
-
-  // 统计视图与设置面板里，上半区不是列表，分隔条不出现。
-  check('统计视图没有主界面分隔条',
-    mainSplitterOf(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats' })), undefined)
-  const withConfig = render({
-    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
-    [IDX.configOpen]: true, [IDX.mainSplit]: 120,
-  })
-  check('设置面板展开时没有主界面分隔条', mainSplitterOf(withConfig), undefined)
-  // 设置面板展开时连列表容器都不渲染——勾选表独占 body。
-  check('设置面板展开时没有列表容器', mainListOf(withConfig), undefined)
-  const cfgBody = flatten(withConfig).find(n => n.props !== undefined
-    && n.props.style !== undefined && n.props.style.padding === '4px 0 6px')
-  check('设置面板展开时 body 不做上下分配', cfgBody?.props.style?.display, undefined)
-}
-
-// ── 4e. 拖动分隔条真的会改高度 ────────────────────────────────────────────
-// 这里验证的是拖动链路本身：按下 → window 上的 pointermove → 状态变化。
-// 之前用元素自己的 pointer capture，重渲染换掉节点后事件就断了，
-// 表现为"光标变了但拖不动"，所以听的是 window。
-{
-  const handlers = {}
-  global.window.addEventListener = (type, fn) => { handlers[type] = fn }
-  global.window.removeEventListener = (type) => { delete handlers[type] }
-
-  const list = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })
-  const splitter = flatten(list).find(n => n.props !== undefined && n.props['data-main-splitter'] === 'true')
-  check('分隔条带按下处理', typeof splitter?.props.onPointerDown, 'function')
-
-  // 造一个够用的 DOM 桩：分隔条的父节点能查到列表，列表有高度。
-  const fakeList = { offsetHeight: 120, scrollHeight: 90, parentElement: { clientHeight: 400, offsetHeight: 400 } }
-  const fakeParent = { querySelector: () => fakeList }
-  const fakeEvent = {
-    button: 0, clientY: 100,
-    currentTarget: { parentElement: fakeParent },
-    preventDefault() {}, stopPropagation() {},
-  }
-
-  splitter.props.onPointerDown(fakeEvent)
-  check('按下后挂了 window pointermove', typeof handlers.pointermove, 'function')
-  check('按下后挂了 window pointerup', typeof handlers.pointerup, 'function')
-
-  // 往下拖 60px：高度应变成 120 + 60 = 180。
-  handlers.pointermove({ clientY: 160, preventDefault() {} })
-  check('拖动改变渠道列表高度', hooks[IDX.mainSplit], 180)
-
-  // 继续拖到远超上限：夹在可视高度之内。
-  handlers.pointermove({ clientY: 99999, preventDefault() {} })
-  // 上限 = 内容高度(90) + 下方余量(400-120=280) = 370，
-  // 不再是「可用高度 − 48」那种推算值。
-  check('拖动高度被夹进上限', hooks[IDX.mainSplit], 370)
-
-  // 双向都要跟手。基准是按下那一刻的静态值，任何位置都能落在
-  // (startHeight + 位移) 上，不会出现「只能变大、拖不回去」。
-  handlers.pointermove({ clientY: 90, preventDefault() {} })
-  check('往回拖会变小', hooks[IDX.mainSplit], 120 + (90 - 100))
-  handlers.pointermove({ clientY: 140, preventDefault() {} })
-  check('再往回拖又变大', hooks[IDX.mainSplit], 120 + (140 - 100))
-
-  // 拖到比内容还矮时被下限兜住（内容 90px），不会把行压扁。
-  handlers.pointermove({ clientY: 60, preventDefault() {} })
-  check('低于内容高度时被兜住', hooks[IDX.mainSplit], 90)
-
-  // 上下两端都夹住：拉到顶不超过可用高度减一个最小块；
-  // 拉到底停在下限——下限是内容自然高度（scrollHeight=90），
-  // 不是固定 48：钉在 48 会把行压扁，而横线却不动。
-  handlers.pointermove({ clientY: 90000, preventDefault() {} })
-  check('拉到顶停在上限', hooks[IDX.mainSplit], 370)
-  handlers.pointermove({ clientY: -90000, preventDefault() {} })
-  check('拉到底停在内容高度', hooks[IDX.mainSplit], 90)
-
-  // 松手：监听器要摘掉，且高度落盘。
-  handlers.pointerup({})
-  check('松手后摘掉 pointermove', handlers.pointermove, undefined)
-  check('松手后摘掉 pointerup', handlers.pointerup, undefined)
-  check('松手后高度已落盘', global.window.localStorage.getItem(t.MAIN_SPLIT_KEY), '90')
-
-  global.window.localStorage.setItem(t.MAIN_SPLIT_KEY, '')
-}
-
-// ── 4f. 回归：卡片很矮时向下拖仍能变大 ────────────────────────────────────
-// 曾经的 bug：上限按「body.clientHeight − 48」推算。卡片高度自适应时 body 只有
-// 内容那么高（四个渠道约 90px），算出的上限反而小于内容高度，任何方向都被夹到
-// 同一个值——表现就是「向下拖，横线反而往上跳」。
-{
-  const handlers = {}
-  global.window.addEventListener = (type, fn) => { handlers[type] = fn }
-  global.window.removeEventListener = (type) => { delete handlers[type] }
-
-  const list = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })
-  const splitter = flatten(list).find(n => n.props !== undefined && n.props['data-main-splitter'] === 'true')
-
-  // 模拟真实的自适应卡片：body 只有内容高度（90），列表恰好占满它。
-  const shortList = { offsetHeight: 90, scrollHeight: 90, parentElement: { clientHeight: 90, offsetHeight: 90 } }
-  splitter.props.onPointerDown({
-    button: 0, clientY: 100,
-    currentTarget: { parentElement: { querySelector: () => shortList } },
-    preventDefault() {}, stopPropagation() {},
-  })
-
-  // 向下拖 50px：必须变大，且等于 90 + 50。
-  handlers.pointermove({ clientY: 150, preventDefault() {} })
-  check('矮卡片上向下拖会变大', hooks[IDX.mainSplit], 140)
-
-  // 向上拖回：必须变小。
-  handlers.pointermove({ clientY: 70, preventDefault() {} })
-  check('矮卡片上向上拖会变小', hooks[IDX.mainSplit], 90)
-
-  handlers.pointerup({})
-  global.window.localStorage.setItem(t.MAIN_SPLIT_KEY, '')
 }
 
 // ── 4g. 回归：跨天后主界面今日 token 归零 ─────────────────────────────────
@@ -695,102 +508,6 @@ check('收起时不显示配置面板',
   const todayTexts = allText(withToday).join(' ')
   check('今天有记录时显示今天的 WorkBuddy token', todayTexts.includes('1000'), true)
   check('今天有记录时显示今天的渠道 token', todayTexts.includes('10'), true)
-}
-
-// ── 5. 隐藏后合计与列表一致 ───────────────────────────────────────────────
-// 从渲染出的页脚文字里读合计，确认它算的是可见渠道。
-{
-  const rows = [
-    { id: 'qoder', name: 'Qoder', org: '', accent: '#000', ok: true, at: 1, total: 5000, accounts: 1, failed: 0 },
-    { id: 'trae', name: 'TRAE', org: '', accent: '#000', ok: true, at: 1, total: 900, accounts: 1, failed: 0 },
-  ]
-  const visible = flatten(render({ [IDX.rows]: rows, [IDX.hiddenIds]: new Set() }))
-    .map(node => (typeof node === 'string' ? node : (node.children || []).filter(child => typeof child === 'string').join('')))
-    .filter(text => typeof text === 'string' && text.length > 0)
-    .join(' ')
-  check('全可见时合计包含两者', visible.includes('5900'), true)
-
-  const hiddenTrae = flatten(render({ [IDX.rows]: rows, [IDX.hiddenIds]: new Set(['trae']) }))
-    .map(node => (typeof node === 'string' ? node : (node.children || []).filter(child => typeof child === 'string').join('')))
-    .filter(text => typeof text === 'string' && text.length > 0)
-    .join(' ')
-  check('隐藏 TRAE 后合计只剩 Qoder', hiddenTrae.includes('5000') && !hiddenTrae.includes('5900'), true)
-  check('隐藏后页脚提示已隐藏数量', hiddenTrae.includes('已隐藏 1 个'), true)
-}
-
-// ── 6. 全部隐藏时的空状态提示 ─────────────────────────────────────────────
-{
-  const tree = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(allIds) })
-  const texts = flatten(tree)
-    .map(node => (typeof node === 'string' ? node : (node.children || []).filter(child => typeof child === 'string').join('')))
-    .join(' ')
-  check('全部隐藏时给出回程提示', texts.includes('所有渠道都被隐藏了'), true)
-}
-
-// ── 7. 当日累计列 ─────────────────────────────────────────────────────────
-// today 状态 → 行上的「今日 −N」文字。没有消耗的渠道不该多占一行。
-{
-  const rows = [
-    { id: 'qoder', name: 'Qoder', org: '', accent: '#000', ok: true, at: 1, total: 5000, accounts: 1, failed: 0, unit: 'credits', packages: [] },
-    { id: 'trae', name: 'TRAE', org: '', accent: '#000', ok: true, at: 1, total: 900, accounts: 1, failed: 0, unit: 'credits', packages: [] },
-  ]
-  const textsOf = overrides => flatten(render(overrides))
-    .map(node => (typeof node === 'string' ? node : (node.children || []).filter(child => typeof child === 'string').join('')))
-    .filter(text => typeof text === 'string' && text.length > 0)
-    .join(' ')
-
-  // 今日积分已经提到独立的「今日」列（与 WorkBuddy 账号行对齐），
-  // 不再以「今日 −X」的小字挂在余额下面。
-  const withToday = textsOf({ [IDX.rows]: rows, [IDX.today]: { qoder: 320 } })
-  check('今日积分显示在对应渠道上', withToday.includes('−320'), true)
-  check('没有今日消耗的渠道显示占位点', (withToday.match(/·/g) || []).length >= 1, true)
-
-  const noToday = textsOf({ [IDX.rows]: rows, [IDX.today]: {} })
-  check('累计表为空时不显示今日数字', noToday.includes('−320'), false)
-}
-
-// ── 8. 告警档位落到行上 ───────────────────────────────────────────────────
-// tone 除了换颜色，还要给 data-tone 供外部样式与测试断言用。
-{
-  const rows = [
-    { id: 'qoder', name: 'Qoder', org: '', accent: '#000', ok: true, at: 1, total: 0, accounts: 1, failed: 0, unit: 'credits', packages: [] },
-    { id: 'trae', name: 'TRAE', org: '', accent: '#000', ok: true, at: 1, total: 100, accounts: 1, failed: 0, unit: 'credits', packages: [] },
-    { id: 'cline', name: 'Cline', org: '', accent: '#000', ok: true, at: 1, total: 88, accounts: 1, failed: 0, unit: 'credits', packages: [] },
-  ]
-  const tones = flatten(render({ [IDX.rows]: rows }))
-    .filter(node => node.props !== undefined && typeof node.props['data-tone'] === 'string')
-    .map(node => [node.props['data-channel'], node.props['data-tone']])
-  check('余额 0 标 danger', tones.find(([id]) => id === 'qoder')?.[1], 'danger')
-  check('余额 100 标 warn', tones.find(([id]) => id === 'trae')?.[1], 'warn')
-  check('余额 88 标 warn', tones.find(([id]) => id === 'cline')?.[1], 'warn')
-}
-
-// ── 9. 单位在渲染里生效 ───────────────────────────────────────────────────
-// Cline 是美元：必须显示 $88.50，而不是被 kilo 抹成 88。
-{
-  const rows = [
-    { id: 'cline', name: 'Cline', org: '', accent: '#000', ok: true, at: 1, total: 88.5, accounts: 1, failed: 0, unit: 'USD', packages: [] },
-  ]
-  const text = flatten(render({ [IDX.rows]: rows }))
-    .map(node => (typeof node === 'string' ? node : (node.children || []).filter(child => typeof child === 'string').join('')))
-    .join(' ')
-  check('美元余额带 $ 与两位小数', text.includes('$88.50'), true)
-}
-
-// ── 10. 失败行沿用上一轮读数并带原因 ──────────────────────────────────────
-{
-  const rows = [
-    { id: 'qoder', name: 'Qoder', org: '', accent: '#000', ok: false, at: 1, total: 4321, accounts: 1, failed: 1, stale: true, error: '凭据未配置', unit: 'credits', packages: [] },
-  ]
-  const tree = render({ [IDX.rows]: rows })
-  const text = flatten(tree)
-    .map(node => (typeof node === 'string' ? node : (node.children || []).filter(child => typeof child === 'string').join('')))
-    .join(' ')
-  check('失败行标出查询失败', text.includes('查询失败'), true)
-  check('失败行仍显示上一轮余额', text.includes('4321'), true)
-  const amountNode = flatten(tree).find(node =>
-    node.props !== undefined && node.props.title !== undefined && String(node.props.title).includes('凭据未配置'))
-  check('失败原因进了 tooltip', amountNode !== undefined, true)
 }
 
 // ── 11. poll 的账本回退链路 ───────────────────────────────────────────────
@@ -949,7 +666,7 @@ check('收起时不显示配置面板',
     toggle.props.onClick({ stopPropagation() {} })
     cursor = 0
     const expanded = t.CreditWatch({ ctx: {} })
-    check('展开后恢复列表', countRows(expanded), 10)
+    check('展开后恢复大栏（渠道列表已移除）', countRows(expanded), 0)
     check('展开后恢复原来的高度', expanded.props.style.height, 320)
     check('展开状态写入持久化存储', store.get('ofm-credit-watch.collapsed'), '0')
   } finally {
