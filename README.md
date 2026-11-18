@@ -29,6 +29,13 @@
 - **北辰 API 余额与用量**：列表下方的独立折叠分区，标题栏常驻剩余余额（美元，按告警
   档位变色）与今日扣费、token 总量，展开看余额、今日 token 与缓存读取；统计界面里
   跟着日期条翻每天的北辰用量
+- **GPT 订阅限额**：独立折叠分区，显示 ChatGPT 订阅的 5 小时窗与周窗剩余百分比
+  （读 dsh-codex-subscription 落盘的预测快照），展开看重置时间；剩余 ≤10% 转红、
+  ≤25% 转黄
+- **OFM 模型今日 token**：独立分区，列出 OFM 十个账号渠道与免费车道当天的
+  token 用量（数据取自 cost-meter 账本），头部给合计
+- **大栏隐藏**：设置面板可勾选隐藏北辰 / GPT 订阅 / OFM 模型 / WorkBuddy
+  四个大栏
 - **token 统计界面**：标题栏的统计按钮把整张卡片切换到统计页，按日期查看每日 token 用量
   （输入 + 缓存读 + 输出合成一个数），列出当天有调用的 OFM 渠道、WorkBuddy 合计，
   以及 WorkBuddy 所有账号的累计积分消耗
@@ -77,6 +84,8 @@
 | POST | `/api/ofm-credit-watch/wb` | 报一轮读数 `{ readings: [{key, total}] }`，返回累加后的今日与累计 |
 | GET | `/api/ofm-credit-watch/usage` | 按天汇总的 token 用量（数据取自 cost-meter 账本） |
 | GET | `/api/ofm-credit-watch/beichen` | 北辰 API 的余额与按日用量（Host 侧用 API Key 取数并逐日留存） |
+| GET | `/api/ofm-credit-watch/codex` | GPT 订阅的 5 小时/周限额（读订阅插件的预测快照） |
+| GET | `/api/ofm-credit-watch/ofm-tokens` | OFM 各渠道今日 token 用量（读 cost-meter 账本） |
 | GET | `/api/ofm-credit-watch/ping` | 健康检查 |
 
 **为什么差值必须由 Host 算**：同时开两个窗口时，让浏览器各自算差值会把同一笔消耗
