@@ -512,16 +512,6 @@ window.__ModuleLoader__.load({
         return normalizeHiddenSections(JSON.parse(window.localStorage?.getItem(HIDDEN_SECTIONS_KEY) ?? 'null'))
       } catch { return new Set() }
     }
-    function persistHiddenSections(next) {
-      setHiddenSections(next)
-      try { window.localStorage?.setItem(HIDDEN_SECTIONS_KEY, JSON.stringify([...next])) } catch { /* 存储不可用 */ }
-    }
-    function toggleHiddenSections(set, key) {
-      const next = new Set(set)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    }
 
     function loadHidden() {
       try {
@@ -1183,6 +1173,19 @@ window.__ModuleLoader__.load({
       const [ofmTokens, setOfmTokens] = useState(null)
       // 大栏隐藏集合：北辰 / GPT 订阅 / OFM 模型 / WorkBuddy 可在设置面板勾掉。
       const [hiddenSections, setHiddenSections] = useState(() => loadHiddenSections())
+      // 写入与翻转必须在组件内：引用本组件的 state setter。放模块层会拿到
+      // 未定义的 setter，点击时抛 ReferenceError，React 把异常吞掉后表现为
+      // 「勾选框点不动」。
+      const persistHiddenSections = useCallback(next => {
+        setHiddenSections(next)
+        try { window.localStorage?.setItem(HIDDEN_SECTIONS_KEY, JSON.stringify([...next])) } catch { /* 存储不可用 */ }
+      }, [])
+      const toggleHiddenSections = useCallback((set, key) => {
+        const next = new Set(set)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      }, [])
       // GPT 分区自己的折叠状态：默认收起，与北辰一致。
       const [codexOpen, setCodexOpen] = useState(() => {
         try { return window.localStorage?.getItem(CODEX_OPEN_KEY) === '1' } catch { return false }
@@ -2433,7 +2436,15 @@ window.__ModuleLoader__.load({
       // ── OFM 模型分区 ────────────────────────────────────────────────────
       // cost-meter 账本里 OFM 各渠道的今日 token。折叠栏给合计，展开逐渠道列。
       const ofmChannelRows = Array.isArray(ofmTokens?.channels)
-        ? ofmTokens.channels.filter(row => row.calls > 0 || (row.input + row.output + row.cacheRead) > 0) : []
+        ? ofmTokens.channels.filter(row => row.calls > 0 || (row.input + row.output + row.cacheRead) > 0)
+          .map(row => ({
+            ...row,
+            // 显示名与今日积分消耗都来自旧渠道行的数据源：合并进大栏后
+            // 渠道列表里那两处就不再重复显示。
+            name: CHANNELS.find(c => c.id === row.channel)?.name ?? row.channel,
+            accent: CHANNELS.find(c => c.id === row.channel)?.accent ?? '#4C8DFF',
+            spent: Number.isFinite(today[row.channel]) ? today[row.channel] : null,
+          })) : []
       const ofmTotalTokens = ofmTokens?.total === null || ofmTokens?.total === undefined ? null
         : (ofmTokens.total.input + ofmTokens.total.output + ofmTokens.total.cacheRead)
       const ofmSection = ofmTokens === null || ofmTokens.available === false || hiddenSections.has('ofm') ? null
@@ -2453,11 +2464,19 @@ window.__ModuleLoader__.load({
             : ofmChannelRows.map(row => h('div', {
               key: row.channel, style: style.wbRow, 'data-ofm-token-row': row.channel,
             },
-              h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
+              h('span', { style: { ...style.stripe, background: row.accent } }),
               h('span', { style: style.wbNameCell },
-                h('span', { style: style.wbName }, row.channel),
+                h('span', { style: style.wbName }, row.name),
                 h('span', { style: style.meta }, fill(t('statsCalls'), { count: row.calls }))),
-              h('span', { style: style.wbCell }, '·'),
+              // 今日积分消耗：从旧渠道行迁来的口径；没消耗显示 ·。
+              h('span', {
+                style: {
+                  ...style.wbCell,
+                  color: row.spent !== null && row.spent > 0
+                    ? 'var(--dsw-alias-state-warn-primary, #d97706)'
+                    : 'var(--dsw-alias-label-secondary, #888)',
+                },
+              }, row.spent !== null && row.spent > 0 ? `−${formatAmount(row.spent, 'credits')}` : '·'),
               h('span', { style: style.wbAmount }, formatTokens(row.input + row.output + row.cacheRead)))))
 
       // ── 隐藏态：只留一个小胶囊，避免占着屏幕又找不回来 ───────────────────
@@ -2583,10 +2602,8 @@ window.__ModuleLoader__.load({
               const active = Number.isFinite(spentAt) && (now - spentAt) <= IDLE_WINDOW_MS
               const todayUsed = today[row.id]
               const unit = row.unit ?? 'credits'
-              // 本渠道今日的 token 用量；cost-meter 没装或当天没调用就是 null。
-              // 本渠道今日的 token：同样按今天的日期取，跨天后自然归零。
-              const channelUsage = todayUsage?.byChannel?.[row.id]
-              const channelTokens = channelUsage === undefined ? null : totalTokens(channelUsage)
+              // 本渠道今日的 token 与积分消耗已并入下方「OFM 模型」大栏：
+              // 渠道行只留余额，两套口径不再挤在同一屏。
               // 副标题优先报问题，其次报账号数与最近消耗时间——一行放不下三件事。
               const status = row.ok === false
                 ? t('failed')
@@ -2625,11 +2642,8 @@ window.__ModuleLoader__.load({
                       opacity: Number.isFinite(row.total) ? 1 : 0.45,
                     },
                   }, formatAmount(row.total, unit)),
-                  // 余额下方换成本渠道今日的 token 用量：积分与 token 是两套
-                  // 口径，分开读比挤在一行里清楚。
-                  channelTokens === null
-                    ? null
-                    : h('span', { style: style.today }, formatTokens(channelTokens))))
+                  // 今日 token 已迁往「OFM 模型」大栏。
+                  ))
             }))),
           ),
         // 主界面分隔条：上下拖动改渠道列表高度，双击复位。
