@@ -577,6 +577,100 @@ async function readBeichen(force) {
   return beichenInFlight
 }
 
+
+// ── GPT 订阅限额（dsh-codex-subscription）──────────────────────────────────
+/**
+ * 订阅插件把每次 /wham/usage 的读数连同预测样本落在
+ * `~/.dsh/state/codex-subscription/quota-forecast.json`：键是
+ * `[scope, limitId, windowSeconds]`，样本里是 remainingPercent（0-100，剩余量）。
+ * 这里不复制它的 OAuth 生命周期，只读它落好的盘——它自己的界面每分钟都在
+ * 驱动这份快照，数据最多滞后约一分钟。5 小时窗 = 18000s，周窗 = 604800s。
+ */
+const CODEX_FORECAST_FILE = 'state/codex-subscription/quota-forecast.json'
+const CODEX_WINDOWS = [
+  { key: 18_000, label: 'fiveHour' },
+  { key: 604_800, label: 'weekly' },
+]
+
+function readCodexQuota() {
+  let state
+  try {
+    const raw = JSON.parse(readFileSync(path.join(DSH_HOME, CODEX_FORECAST_FILE), 'utf8'))
+    if (raw !== null && typeof raw === 'object' && raw.windows !== null && typeof raw.windows === 'object') state = raw.windows
+    else state = {}
+  } catch {
+    // 订阅插件没装或还没驱动过快照：返回 available:false，面板据此显示占位。
+    return { available: false, windows: [] }
+  }
+  const windows = []
+  for (const [key, record] of Object.entries(state)) {
+    let scope = '', limitId = '', seconds = 0
+    try {
+      const parts = JSON.parse(key)
+      if (Array.isArray(parts)) { scope = String(parts[0] ?? ''); limitId = String(parts[1] ?? ''); seconds = Number(parts[2] ?? 0) }
+    } catch { continue }
+    const last = Array.isArray(record?.samples) && record.samples.length > 0 ? record.samples[record.samples.length - 1] : null
+    const remaining = last === null ? null : Number(last.remainingPercent)
+    if (!Number.isFinite(remaining)) continue
+    const matched = CODEX_WINDOWS.find(row => row.key === seconds)
+    windows.push({
+      scope,
+      limitId,
+      windowSeconds: seconds,
+      kind: matched?.label ?? (seconds < 3600 * 24 ? 'short' : 'long'),
+      remainingPercent: Math.max(0, Math.min(100, remaining)),
+      resetsAt: Number.isFinite(Number(record?.resetsAt)) ? Number(record.resetsAt) * 1000 : null,
+      sampledAt: last === null ? null : Number(last.at),
+    })
+  }
+  // 只留 codex 主限额：scope 取最新样本的那一组，其余（code_review 等）不进面板。
+  const codexWindows = windows.filter(row => row.limitId === 'codex')
+  const latest = codexWindows.reduce((acc, row) => row.sampledAt !== null && (acc === null || row.sampledAt > acc) ? row.sampledAt : acc, null)
+  const picked = latest === null ? [] : codexWindows.filter(row => row.sampledAt === latest)
+  return { available: picked.length > 0, windows: picked }
+}
+
+// ── OFM 模型今日 token（cost-meter）────────────────────────────────────────
+/**
+ * cost-meter 的账本按 `provider:model` 记今日用量；OFM 免费模型走
+ * `our-free-model:` 前缀。这里按渠道（provider id 是冒号后第一段）聚合成
+ * 面板要的形状。账本读不到时 available:false。
+ */
+const COST_METER_LEDGER = 'storages/cost-meter/ledger.json'
+
+function readOfmTokenUsage() {
+  let ledger
+  try {
+    ledger = JSON.parse(readFileSync(path.join(DSH_HOME, COST_METER_LEDGER), 'utf8'))
+  } catch {
+    return { available: false, day: null, channels: [], total: null }
+  }
+  const days = Object.entries(ledger?.days ?? {}).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  if (days.length === 0) return { available: true, day: null, channels: [], total: null }
+  const [date, day] = days[days.length - 1]
+  // 账本键是 `provider:model`。OFM 十个账号渠道各自是独立前缀（与 OFM_PROVIDERS
+  // 一致），免费车道则是 `our-free-model`。模型名里可能还有冒号，只切第一段。
+  const ofmSet = new Set(OFM_PROVIDERS)
+  const channels = {}
+  let grand = { input: 0, output: 0, cacheRead: 0, calls: 0 }
+  for (const [prefix, row] of Object.entries(day?.byProviderModel ?? {})) {
+    const colon = prefix.indexOf(':')
+    const provider = colon === -1 ? prefix : prefix.slice(0, colon)
+    if (!ofmSet.has(provider) && provider !== 'our-free-model') continue
+    const channel = ofmSet.has(provider) ? provider : 'our-free-model'
+    const bucket = channels[channel] ?? (channels[channel] = { channel, input: 0, output: 0, cacheRead: 0, calls: 0 })
+    bucket.input += Number(row?.input ?? 0)
+    bucket.output += Number(row?.output ?? 0)
+    bucket.cacheRead += Number(row?.cacheRead ?? 0)
+    bucket.calls += Number(row?.calls ?? 0)
+    grand.input += Number(row?.input ?? 0)
+    grand.output += Number(row?.output ?? 0)
+    grand.cacheRead += Number(row?.cacheRead ?? 0)
+    grand.calls += Number(row?.calls ?? 0)
+  }
+  return { available: true, day: date, channels: Object.values(channels), total: grand }
+}
+
 // ── HTTP ────────────────────────────────────────────────────────────────────
 
 /**
@@ -658,6 +752,16 @@ async function handleApi(req, res) {
       if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
       return sendJson(res, 200, await readBeichen(url.searchParams.get('force') === '1'))
     }
+    // GPT 订阅限额：读订阅插件落盘的预测快照。
+    if (route === '/codex') {
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
+      return sendJson(res, 200, readCodexQuota())
+    }
+    // OFM 免费模型的今日 token：读 cost-meter 账本。
+    if (route === '/ofm-tokens') {
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
+      return sendJson(res, 200, readOfmTokenUsage())
+    }
     if (route === '/ping') return sendJson(res, 200, { ok: true })
     return sendJson(res, 404, { error: 'not found' })
   } catch (error) {
@@ -690,4 +794,5 @@ export const __test = {
   wbKey, readWorkBuddyLedger, commitWorkBuddy, WB_STALE_MS, WB_RESAVE_MS, RESAVE_MS, STALE_MS,
   readUsageStats, usageLedgerFile, OFM_PROVIDERS, WORKBUDDY_PROVIDERS, usageCache,
   fetchBeichen, readBeichen, readBeichenKey, beichenFile,
+  readCodexQuota, readOfmTokenUsage,
 }
