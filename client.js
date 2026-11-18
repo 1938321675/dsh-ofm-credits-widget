@@ -62,6 +62,8 @@ window.__ModuleLoader__.load({
     const WB_OPEN_KEY = 'ofm-credit-watch.wbOpen'
     /** 北辰 API 分区的折叠状态持久化键。 */
     const BEICHEN_OPEN_KEY = 'ofm-credit-watch.beichenOpen'
+    /** GPT 订阅分区的折叠状态持久化键。 */
+    const CODEX_OPEN_KEY = 'ofm-credit-watch.codexOpen'
     /** 折叠状态持久化键。 */
     const COLLAPSE_KEY = 'ofm-credit-watch.collapsed'
     /** 被用户隐藏的渠道 id 列表持久化键。存「隐藏」而不是「显示」：
@@ -69,12 +71,18 @@ window.__ModuleLoader__.load({
     const HIDDEN_KEY = 'ofm-credit-watch.hiddenChannels'
     /** Host 不可用时，当日累计的本地兜底账本键。 */
     const LOCAL_DAILY_KEY = 'ofm-credit-watch.daily'
+    /** 可隐藏大栏的持久化键：北辰 / GPT 订阅 / OFM 模型 / WorkBuddy。 */
+    const HIDDEN_SECTIONS_KEY = 'ofm-credit-watch.hiddenSections'
     /** Host 账本路由。 */
     const LEDGER_URL = '/api/ofm-credit-watch/ledger'
     /** token 用量路由（数据来自 cost-meter 的日聚合账本）。 */
     const USAGE_URL = '/api/ofm-credit-watch/usage'
     /** 北辰 API 的余额与按日用量：Host 侧解析 Key 并向网关取数。 */
     const BEICHEN_URL = '/api/ofm-credit-watch/beichen'
+    /** GPT 订阅限额：读订阅插件落盘的预测快照。 */
+    const CODEX_URL = '/api/ofm-credit-watch/codex'
+    /** OFM 免费模型的今日 token：读 cost-meter 账本。 */
+    const OFM_TOKENS_URL = '/api/ofm-credit-watch/ofm-tokens'
     /** 当前视图（列表 / 统计）持久化键。 */
     const VIEW_KEY = 'ofm-credit-watch.view'
     /** 统计界面一屏放几天。 */
@@ -194,8 +202,8 @@ window.__ModuleLoader__.load({
     // ─── 文案 ────────────────────────────────────────────────────────────────
     const DICT = {
       zh: {
-        title: 'OFM 积分监控',
-        subtitle: 'EAC router 剩余积分',
+        title: '费用监控',
+        subtitle: '费用与限额',
         refresh: '立即刷新',
         refreshing: '刷新中…',
         never: '尚未查询',
@@ -246,6 +254,21 @@ window.__ModuleLoader__.load({
         beichenBalance: '剩余余额',
         beichenTokens: '今日 Token',
         beichenCache: '缓存读取',
+        codexName: 'GPT 订阅',
+        codexFiveHour: '5 小时',
+        codexWeekly: '本周',
+        codexRemaining: '剩余 {value}',
+        codexResets: '{when}重置',
+        codexResetSoon: '即将重置',
+        codexUnavailable: '未连接 GPT 订阅',
+        ofmName: 'OFM 模型',
+        ofmTokensEmpty: '今天还没有调用',
+        ofmCalls: '{count} 次调用',
+        sectionBeichen: '北辰 API 栏',
+        sectionCodex: 'GPT 订阅栏',
+        sectionOfm: 'OFM 模型栏',
+        sectionWb: 'WorkBuddy 栏',
+        sectionsHint: '大栏显示',
         statsUnavailable: '未连接 cost-meter',
         statsEmpty: '这一天没有调用记录',
         statsToday: '今日',
@@ -270,8 +293,8 @@ window.__ModuleLoader__.load({
         wbRegionGlobal: '国际版',
       },
       en: {
-        title: 'OFM Credit Watch',
-        subtitle: 'EAC router credits left',
+        title: 'Cost Monitor',
+        subtitle: 'costs and quotas',
         refresh: 'Refresh now',
         refreshing: 'Refreshing…',
         never: 'Not queried yet',
@@ -322,6 +345,21 @@ window.__ModuleLoader__.load({
         beichenBalance: 'Balance left',
         beichenTokens: 'Tokens today',
         beichenCache: 'cache read',
+        codexName: 'GPT subscription',
+        codexFiveHour: '5-hour',
+        codexWeekly: 'This week',
+        codexRemaining: '{value} left',
+        codexResets: 'resets {when}',
+        codexResetSoon: 'resets soon',
+        codexUnavailable: 'GPT subscription not connected',
+        ofmName: 'OFM models',
+        ofmTokensEmpty: 'No calls today',
+        ofmCalls: '{count} calls',
+        sectionBeichen: 'Beichen API section',
+        sectionCodex: 'GPT subscription section',
+        sectionOfm: 'OFM models section',
+        sectionWb: 'WorkBuddy section',
+        sectionsHint: 'Sections',
         statsUnavailable: 'cost-meter not connected',
         statsEmpty: 'No calls on this day',
         statsToday: 'today',
@@ -458,6 +496,31 @@ window.__ModuleLoader__.load({
     }
 
     /** 从 localStorage 读隐藏集合；存储不可用或内容损坏时返回空集合。 */
+    /** 大栏隐藏集合：只认四个合法键，其余丢弃。 */
+    const HIDDEN_SECTION_KEYS = ['beichen', 'codex', 'ofm', 'workbuddy']
+    function normalizeHiddenSections(raw) {
+      const out = new Set()
+      if (Array.isArray(raw)) {
+        for (const item of raw) if (HIDDEN_SECTION_KEYS.includes(item)) out.add(item)
+      }
+      return out
+    }
+    function loadHiddenSections() {
+      try {
+        return normalizeHiddenSections(JSON.parse(window.localStorage?.getItem(HIDDEN_SECTIONS_KEY) ?? 'null'))
+      } catch { return new Set() }
+    }
+    function persistHiddenSections(next) {
+      setHiddenSections(next)
+      try { window.localStorage?.setItem(HIDDEN_SECTIONS_KEY, JSON.stringify([...next])) } catch { /* 存储不可用 */ }
+    }
+    function toggleHiddenSections(set, key) {
+      const next = new Set(set)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    }
+
     function loadHidden() {
       try {
         return normalizeHidden(JSON.parse(window.localStorage?.getItem(HIDDEN_KEY) ?? 'null'))
@@ -955,6 +1018,20 @@ window.__ModuleLoader__.load({
       return await res.json()
     }
 
+    /** 拉 GPT 订阅限额快照。订阅插件没装或还没驱动过时 available 为 false。 */
+    async function fetchCodex() {
+      const res = await fetch(CODEX_URL, { cache: 'no-store' })
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      return await res.json()
+    }
+
+    /** 拉 OFM 免费模型的今日 token 用量。cost-meter 没装时 available 为 false。 */
+    async function fetchOfmTokens() {
+      const res = await fetch(OFM_TOKENS_URL, { cache: 'no-store' })
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      return await res.json()
+    }
+
     /** 拉 cost-meter 的按天用量。返回 { available, days }。 */
     async function fetchUsage() {
       const res = await fetch(USAGE_URL, { cache: 'no-store' })
@@ -1099,6 +1176,15 @@ window.__ModuleLoader__.load({
       // 声明放在所有 useState 之后：离线渲染测试按声明顺序取下标注入状态，
       // 插在中间会把后面每一个状态都挤错位。
       const [beichen, setBeichen] = useState(null)
+      // GPT 订阅限额快照与 OFM 模型今日 token：同样接在末尾，原因同上。
+      const [codex, setCodex] = useState(null)
+      const [ofmTokens, setOfmTokens] = useState(null)
+      // 大栏隐藏集合：北辰 / GPT 订阅 / OFM 模型 / WorkBuddy 可在设置面板勾掉。
+      const [hiddenSections, setHiddenSections] = useState(() => loadHiddenSections())
+      // GPT 分区自己的折叠状态：默认收起，与北辰一致。
+      const [codexOpen, setCodexOpen] = useState(() => {
+        try { return window.localStorage?.getItem(CODEX_OPEN_KEY) === '1' } catch { return false }
+      })
       // 北辰分区默认折叠：它与渠道列表是两套账，日常只看标题栏那行就够。
       const [beichenOpen, setBeichenOpen] = useState(() => {
         try { return window.localStorage?.getItem(BEICHEN_OPEN_KEY) === '1' } catch { return false }
@@ -1326,6 +1412,24 @@ window.__ModuleLoader__.load({
         } catch { /* Host 没有用量路由：保持上一轮 */ }
       }, [])
 
+      /** 采一轮 GPT 订阅限额；失败保留上一轮。 */
+      const pollCodex = useCallback(async () => {
+        try {
+          const next = await fetchCodex()
+          if (!alive.current) return
+          if (next?.available !== false) setCodex(next)
+        } catch { /* 保留上一轮 */ }
+      }, [])
+
+      /** 采一轮 OFM 模型今日 token；失败保留上一轮。 */
+      const pollOfmTokens = useCallback(async () => {
+        try {
+          const next = await fetchOfmTokens()
+          if (!alive.current) return
+          if (next?.available !== false) setOfmTokens(next)
+        } catch { /* 保留上一轮 */ }
+      }, [])
+
       /**
        * 采一轮北辰 API。
        *
@@ -1429,6 +1533,15 @@ window.__ModuleLoader__.load({
           document.removeEventListener('visibilitychange', onVisibility)
         }
       }, [pollBeichen])
+
+      // GPT 订阅与 OFM token 跟北辰同一分钟节拍：三个都是只读快照，
+      // 多打一次也只多一次本地读文件。
+      useEffect(() => {
+        void pollCodex()
+        void pollOfmTokens()
+        const timer = window.setInterval(() => { void pollCodex(); void pollOfmTokens() }, BEICHEN_POLL_MS)
+        return () => window.clearInterval(timer)
+      }, [pollCodex, pollOfmTokens])
 
       // 每 10 秒走一次"现在"，让"3 分钟前有消耗"这类相对时间自己走字，
       // 而不用为了刷新相对时间重发 RPC。
@@ -2011,6 +2124,17 @@ window.__ModuleLoader__.load({
                   ? formatAmount(row.total, row.unit ?? 'credits')
                   : (row.ok === false ? t('failed') : t('noData'))))
         }),
+        // 大栏开关：整块分区（北辰 / GPT 订阅 / OFM 模型 / WorkBuddy）的显示与否。
+        h('div', { style: { ...style.configHint, marginTop: 10 } }, t('sectionsHint')),
+        [['beichen', 'sectionBeichen'], ['codex', 'sectionCodex'], ['ofm', 'sectionOfm'], ['workbuddy', 'sectionWb']].map(([key, labelKey]) =>
+          h('label', { key, style: style.option, 'data-section': key, 'data-checked': hiddenSections.has(key) ? 'false' : 'true' },
+            h('input', {
+              type: 'checkbox', style: style.checkbox,
+              checked: !hiddenSections.has(key),
+              onChange: () => persistHiddenSections(toggleHiddenSections(hiddenSections, key)),
+            }),
+            h('span', { style: { width: 3, height: 14, borderRadius: 2, background: '#4C8DFF', flex: '0 0 auto' } }),
+            h('span', { style: style.optionName }, t(labelKey)))),
         h('div', { style: style.configActions },
           h('button', {
             type: 'button', style: style.pill,
@@ -2198,7 +2322,7 @@ window.__ModuleLoader__.load({
       // 与 WorkBuddy 同一种折叠分区：标题栏常驻，展开才看明细。北辰不是
       // channel-pack 的渠道，所以不进上面的渠道列表——否则「几个渠道有余额」
       // 这类汇总会被一个口径完全不同的上游污染。
-      const beichenSection = beichenBalance === null ? null : (() => {
+      const beichenSection = beichenBalance === null || hiddenSections.has('beichen') ? null : (() => {
         const toggle = () => setBeichenOpen(open => {
           const next = !open
           try { window.localStorage?.setItem(BEICHEN_OPEN_KEY, next ? '1' : '0') } catch { /* 存储不可用 */ }
@@ -2245,6 +2369,76 @@ window.__ModuleLoader__.load({
               h('span', { style: style.wbCell }, beichenToday === null ? '·' : spent),
               h('span', { style: style.wbAmount }, formatTokens(today.totalTokens ?? 0)))))
       })()
+
+
+      // ── GPT 订阅分区 ────────────────────────────────────────────────────
+      // 数据源是订阅插件落盘的预测快照（Host 侧读文件）：5 小时窗与周窗的
+      // 剩余百分比。折叠栏给「5小时 63% · 本周 94%」，展开加重置时间。
+      const codexFiveHour = Array.isArray(codex?.windows)
+        ? codex.windows.find(row => row.kind === 'fiveHour') ?? null : null
+      const codexWeekly = Array.isArray(codex?.windows)
+        ? codex.windows.find(row => row.kind === 'weekly') ?? null : null
+      const resetWhen = row => {
+        if (row === null || !Number.isFinite(row.resetsAt)) return ''
+        const ms = row.resetsAt - now
+        if (ms <= 0) return t('codexResetSoon')
+        return fill(t('codexResets'), { when: span(ms) })
+      }
+      const pct = row => row === null ? '—' : `${Math.round(row.remainingPercent)}%`
+      const codexSection = codex === null || codex.available === false || hiddenSections.has('codex') ? null : (() => {
+        const toggle = () => setCodexOpen(open => {
+          const next = !open
+          try { window.localStorage?.setItem(CODEX_OPEN_KEY, next ? '1' : '0') } catch { /* 存储不可用 */ }
+          return next
+        })
+        const summary = codexFiveHour === null && codexWeekly === null ? t('codexUnavailable')
+          : [codexFiveHour, codexWeekly].map((row, index) =>
+            row === null ? null : `${index === 0 ? t('codexFiveHour') : t('codexWeekly')} ${pct(row)}`).filter(Boolean).join(' · ')
+        return h('div', { style: style.wbWrap, 'data-ofm-credit-watch-codex': 'section' },
+          h('div', {
+            style: style.wbHead, onClick: toggle, role: 'button',
+            title: codexOpen ? t('wbCollapse') : t('wbExpand'),
+            'aria-expanded': codexOpen ? 'true' : 'false',
+          },
+            h('span', { style: style.wbTitle }, t('codexName')),
+            h('span', { style: style.wbSum }, summary),
+            h('span', { style: style.meta }, codexOpen ? '▾' : '▸')),
+          !codexOpen ? null : [codexFiveHour, codexWeekly].map((row, index) => row === null ? null : h('div', {
+            key: index, style: style.wbRow, 'data-codex-row': index === 0 ? 'fiveHour' : 'weekly',
+          },
+            h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
+            h('span', { style: style.wbNameCell },
+              h('span', { style: style.wbName }, index === 0 ? t('codexFiveHour') : t('codexWeekly')),
+              h('span', { style: style.meta }, resetWhen(row))),
+            h('span', { style: style.wbCell }, '·'),
+            h('span', { style: { ...style.wbAmount, color: TONE[row.remainingPercent <= 10 ? 'danger' : row.remainingPercent <= 25 ? 'warn' : 'ok'] } },
+              pct(row)))))
+      })()
+
+      // ── OFM 模型分区 ────────────────────────────────────────────────────
+      // cost-meter 账本里 OFM 各渠道的今日 token。折叠栏给合计，展开逐渠道列。
+      const ofmChannelRows = Array.isArray(ofmTokens?.channels)
+        ? ofmTokens.channels.filter(row => row.calls > 0 || (row.input + row.output + row.cacheRead) > 0) : []
+      const ofmTotalTokens = ofmTokens?.total === null || ofmTokens?.total === undefined ? null
+        : (ofmTokens.total.input + ofmTokens.total.output + ofmTokens.total.cacheRead)
+      const ofmSection = ofmTokens === null || ofmTokens.available === false || hiddenSections.has('ofm') ? null
+        : h('div', { style: style.wbWrap, 'data-ofm-credit-watch-ofm': 'section' },
+          h('div', { style: style.wbHead },
+            h('span', { style: style.wbTitle }, t('ofmName')),
+            h('span', { style: style.wbSum },
+              ofmTokens.day === null ? t('ofmTokensEmpty')
+                : ofmTotalTokens === null ? '—' : `${formatTokens(ofmTotalTokens)} tok`)),
+          ofmChannelRows.length === 0
+            ? h('div', { style: style.wbEmpty }, t('ofmTokensEmpty'))
+            : ofmChannelRows.map(row => h('div', {
+              key: row.channel, style: style.wbRow, 'data-ofm-token-row': row.channel,
+            },
+              h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
+              h('span', { style: style.wbNameCell },
+                h('span', { style: style.wbName }, row.channel),
+                h('span', { style: style.meta }, fill(t('statsCalls'), { count: row.calls }))),
+              h('span', { style: style.wbCell }, '·'),
+              h('span', { style: style.wbAmount }, formatTokens(row.input + row.output + row.cacheRead)))))
 
       // ── 隐藏态：只留一个小胶囊，避免占着屏幕又找不回来 ───────────────────
       if (hidden) {
@@ -2434,9 +2628,11 @@ window.__ModuleLoader__.load({
         // 一段与勾选无关的内容，否则设置一打开就得先往下滚。
         // 统计视图是整块替换，WorkBuddy 分区在这里让位；否则它会挂在统计页
         // 下面，看起来像统计页只铺了一半。
-        // 北辰分区在 WorkBuddy 之上：它一行就能读完，放在上面比沉到最底更好找。
+        // 四个大栏：北辰 → GPT 订阅 → OFM 模型 → WorkBuddy，各自可在设置面板隐藏。
         view === 'stats' || configOpen ? null : beichenSection,
-        view === 'stats' || configOpen ? null : wbSection,
+        view === 'stats' || configOpen ? null : codexSection,
+        view === 'stats' || configOpen ? null : ofmSection,
+        view === 'stats' || configOpen || hiddenSections.has('workbuddy') ? null : wbSection,
         // 统计视图不显示页脚：它是「几个渠道有余额 / 隐藏了几个」的列表汇总，
         // 放在用量统计页里既不对题，也挤掉了本就不宽的高度。
         collapsed || view === 'stats' ? null : h('div', { style: style.footer },
