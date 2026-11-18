@@ -64,6 +64,8 @@ window.__ModuleLoader__.load({
     const BEICHEN_OPEN_KEY = 'ofm-credit-watch.beichenOpen'
     /** GPT 订阅分区的折叠状态持久化键。 */
     const CODEX_OPEN_KEY = 'ofm-credit-watch.codexOpen'
+    /** OFM 模型分区的折叠状态持久化键。 */
+    const OFM_OPEN_KEY = 'ofm-credit-watch.ofmOpen'
     /** 折叠状态持久化键。 */
     const COLLAPSE_KEY = 'ofm-credit-watch.collapsed'
     /** 被用户隐藏的渠道 id 列表持久化键。存「隐藏」而不是「显示」：
@@ -1189,6 +1191,10 @@ window.__ModuleLoader__.load({
       const [beichenOpen, setBeichenOpen] = useState(() => {
         try { return window.localStorage?.getItem(BEICHEN_OPEN_KEY) === '1' } catch { return false }
       })
+      // OFM 模型分区的折叠状态：同样默认收起。
+      const [ofmOpen, setOfmOpen] = useState(() => {
+        try { return window.localStorage?.getItem(OFM_OPEN_KEY) === '1' } catch { return false }
+      })
 
       // 上一轮读数与串行保护：轮询和手动刷新可能重叠，只允许最新一轮落库。
       const previous = useRef(null)
@@ -2050,6 +2056,10 @@ window.__ModuleLoader__.load({
         // 拖过分隔条之后由它吃满剩余高度，横线才会跟着手走；
         // minHeight: 0 让它能被压下去（内容自己滚），不把卡片顶大。
         wbWrap: mainSplit === null ? {} : { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' },
+        // 次要分区（北辰 / GPT / OFM）：与 WorkBuddy 同一种视觉，但不参与
+        // flex 高度分配——它们都抢 flex-grow 会把渠道列表挤出可视区（实测
+        // 表现为「退出设置后渠道列表被顶走，只剩分区」）。定高内容自然排。
+        sectionWrap: mainSplit === null ? {} : { flex: '0 0 auto', minHeight: 0, overflowY: 'auto' },
         wbHead: {
           display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
           cursor: 'pointer', fontSize: 11.5, fontWeight: 600,
@@ -2131,6 +2141,11 @@ window.__ModuleLoader__.load({
             h('input', {
               type: 'checkbox', style: style.checkbox,
               checked: !hiddenSections.has(key),
+              // 点击事件挂在 label 上统一处理：input 的原生行为在这里会造成
+              // 「onChange 触发后浏览器再经 label 派发一次」，勾选状态被来回
+              // 翻转，表现为“点不动”。preventDefault 掉原生切换，只走我们的
+              // onChange 一条路。
+              onClick: event => event.preventDefault(),
               onChange: () => persistHiddenSections(toggleHiddenSections(hiddenSections, key)),
             }),
             h('span', { style: { width: 3, height: 14, borderRadius: 2, background: '#4C8DFF', flex: '0 0 auto' } }),
@@ -2330,7 +2345,7 @@ window.__ModuleLoader__.load({
         })
         const today = beichenToday ?? {}
         const spent = `−$${Number(today.actualCost ?? 0).toFixed(2)}`
-        return h('div', { style: style.wbWrap, 'data-ofm-credit-watch-beichen': 'section' },
+        return h('div', { style: style.wbWrap, style: style.sectionWrap, 'data-ofm-credit-watch-beichen': 'section' },
           h('div', {
             style: style.wbHead, onClick: toggle, role: 'button',
             title: beichenOpen ? t('wbCollapse') : t('wbExpand'),
@@ -2394,7 +2409,7 @@ window.__ModuleLoader__.load({
         const summary = codexFiveHour === null && codexWeekly === null ? t('codexUnavailable')
           : [codexFiveHour, codexWeekly].map((row, index) =>
             row === null ? null : `${index === 0 ? t('codexFiveHour') : t('codexWeekly')} ${pct(row)}`).filter(Boolean).join(' · ')
-        return h('div', { style: style.wbWrap, 'data-ofm-credit-watch-codex': 'section' },
+        return h('div', { style: style.wbWrap, style: style.sectionWrap, 'data-ofm-credit-watch-codex': 'section' },
           h('div', {
             style: style.wbHead, onClick: toggle, role: 'button',
             title: codexOpen ? t('wbCollapse') : t('wbExpand'),
@@ -2422,13 +2437,18 @@ window.__ModuleLoader__.load({
       const ofmTotalTokens = ofmTokens?.total === null || ofmTokens?.total === undefined ? null
         : (ofmTokens.total.input + ofmTokens.total.output + ofmTokens.total.cacheRead)
       const ofmSection = ofmTokens === null || ofmTokens.available === false || hiddenSections.has('ofm') ? null
-        : h('div', { style: style.wbWrap, 'data-ofm-credit-watch-ofm': 'section' },
-          h('div', { style: style.wbHead },
+        : h('div', { style: style.sectionWrap, 'data-ofm-credit-watch-ofm': 'section' },
+          h('div', {
+            style: style.wbHead, onClick: () => setOfmOpen(open => !open), role: 'button',
+            title: ofmOpen ? t('wbCollapse') : t('wbExpand'),
+            'aria-expanded': ofmOpen ? 'true' : 'false',
+          },
             h('span', { style: style.wbTitle }, t('ofmName')),
             h('span', { style: style.wbSum },
               ofmTokens.day === null ? t('ofmTokensEmpty')
-                : ofmTotalTokens === null ? '—' : `${formatTokens(ofmTotalTokens)} tok`)),
-          ofmChannelRows.length === 0
+                : ofmTotalTokens === null ? '—' : `${formatTokens(ofmTotalTokens)} tok`),
+            h('span', { style: style.meta }, ofmOpen ? '▾' : '▸')),
+          !ofmOpen ? null : ofmChannelRows.length === 0
             ? h('div', { style: style.wbEmpty }, t('ofmTokensEmpty'))
             : ofmChannelRows.map(row => h('div', {
               key: row.channel, style: style.wbRow, 'data-ofm-token-row': row.channel,
