@@ -191,7 +191,7 @@ const IDX = {
   // 视图与 token 用量：接在 WorkBuddy 之后。
   view: 20, usage: 21, usageDate: 22, statsSplit: 23, mainSplit: 24,
   // 北辰 API 及后续大栏：声明在所有 useState 之后，下标依次排开。
-  beichen: 25, codex: 26, ofmTokens: 27, hiddenSections: 28, codexOpen: 29, beichenOpen: 30,
+  beichen: 25, codex: 26, ofmTokens: 27, hiddenSections: 28, codexOpen: 29, beichenOpen: 30, ofmOpen: 31,
 }
 
 /** WorkBuddy 分区节点。 */
@@ -262,9 +262,14 @@ check('展开 GPT 分区后两行限额',
 check('隐藏 GPT 栏后分区不渲染',
   hasCodex(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.codex]: codexReading, [IDX.hiddenSections]: new Set(['codex']) })), false)
 
-check('OFM 读数到达后出现分区并列出渠道',
-  hasOfm(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.ofmTokens]: ofmReading }))
-  && countOfmRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.ofmTokens]: ofmReading })) === 2, true)
+check('OFM 读数到达后出现分区',
+  hasOfm(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.ofmTokens]: ofmReading })), true)
+
+check('OFM 分区默认折叠只留标题栏',
+  countOfmRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.ofmTokens]: ofmReading })), 0)
+
+check('展开 OFM 分区后列出渠道',
+  countOfmRows(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.ofmTokens]: ofmReading, [IDX.ofmOpen]: true })), 2)
 
 check('隐藏 OFM 栏后分区不渲染',
   hasOfm(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.ofmTokens]: ofmReading, [IDX.hiddenSections]: new Set(['ofm']) })), false)
