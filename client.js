@@ -272,6 +272,8 @@ window.__ModuleLoader__.load({
         codexWhenToday: '今天 {time}',
         codexWhenTomorrow: '明天 {time}',
         codexWhenDate: '{month}月{day}日 {time}',
+        codexChipFiveHour: '5h',
+        codexChipWeekly: '1w',
         ofmName: 'OFM 模型',
         ofmTokensEmpty: '今天还没有调用',
         ofmCalls: '{count} 次调用',
@@ -372,6 +374,8 @@ window.__ModuleLoader__.load({
         codexWhenToday: 'today {time}',
         codexWhenTomorrow: 'tomorrow {time}',
         codexWhenDate: '{month} {day}, {time}',
+        codexChipFiveHour: '5h',
+        codexChipWeekly: '1w',
         ofmName: 'OFM models',
         ofmTokensEmpty: 'No calls today',
         ofmCalls: '{count} calls',
@@ -504,6 +508,37 @@ window.__ModuleLoader__.load({
 
     /** 英文月份缩写：悬浮提示里的绝对时间跟随界面语言。 */
     const MONTHS_EN = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+    // ─── 注入的样式表 ────────────────────────────────────────────────────────
+    /**
+     * 纯 inline style 表达不了 :hover 与过渡，这里注入一份极小的样式表补齐。
+     *
+     * 只做三件事：行悬停的弱高亮、大栏之间的一条分隔线、折叠三角的旋转。
+     * 颜色一律走主题变量，明暗主题自动跟随；宿主不提供 DOM 操作时安静跳过，
+     * 退回没有悬停反馈的纯 inline 表现。
+     */
+    const STYLE_ID = 'dsh-ofm-credit-watch-style'
+    let styleInjected = false
+    function ensureStyles() {
+      if (styleInjected) return
+      styleInjected = true
+      try {
+        if (!document.createElement || !document.head) return
+        if (document.getElementById?.(STYLE_ID)) return
+        const el = document.createElement('style')
+        el.id = STYLE_ID
+        el.textContent = [
+          '[data-ofm-credit-watch="panel"] .ofm-row{transition:background-color .12s ease}',
+          '[data-ofm-credit-watch="panel"] .ofm-row:hover{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4b7bec) 8%,transparent)}',
+          '[data-ofm-credit-watch="panel"] .ofm-head{border-radius:8px;transition:background-color .12s ease}',
+          '[data-ofm-credit-watch="panel"] .ofm-head:hover{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4b7bec) 6%,transparent)}',
+          '[data-ofm-credit-watch="panel"] .ofm-caret{display:inline-block;transition:transform .12s ease;transform-origin:50% 50%}',
+          '[data-ofm-credit-watch="panel"] .ofm-section+.ofm-section{margin-top:5px;padding-top:5px;border-top:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.32))}',
+        ].join('\n')
+        document.head.appendChild(el)
+      } catch { /* 宿主不给 DOM 操作：当作已注入，不影响渲染 */ }
+    }
+
 
     const round2 = value => Math.round(value * 100) / 100
 
@@ -1595,6 +1630,10 @@ window.__ModuleLoader__.load({
         return () => window.clearInterval(timer)
       }, [pollCodex, pollOfmTokens])
 
+      // 注入悬停与过渡用的样式表。放在 effect 里：渲染阶段不碰 DOM，宿主
+      // 不支持时 ensureStyles 自己安静跳过，退回纯 inline 表现。
+      useEffect(() => { ensureStyles() }, [])
+
       // 每 10 秒走一次"现在"，让"3 分钟前有消耗"这类相对时间自己走字，
       // 而不用为了刷新相对时间重发 RPC。
       useEffect(() => {
@@ -1828,6 +1867,14 @@ window.__ModuleLoader__.load({
         danger: 'var(--dsw-alias-state-error-primary, #d33)',
         muted: 'var(--dsw-alias-label-secondary, #888)',
       }
+      // 进度条要的是实色：ok 档的文字色是 inherit，涂到条上看不出档位。
+      const BAR_TONE = {
+        ok: 'var(--dsw-alias-brand-primary, #4b7bec)',
+        warn: 'var(--dsw-alias-state-warn-primary, #d97706)',
+        danger: 'var(--dsw-alias-state-error-primary, #d33)',
+      }
+      /** 余量档位：与百分比数字同一套阈值（≤10 红、≤25 黄）。 */
+      const barTone = percent => BAR_TONE[percent <= 10 ? 'danger' : percent <= 25 ? 'warn' : 'ok']
       const style = {
         panel: {
           position: 'fixed',
@@ -1841,10 +1888,12 @@ window.__ModuleLoader__.load({
           flexDirection: 'column',
           zIndex: 2147483000,
           pointerEvents: 'auto',
-          borderRadius: 14,
-          border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.22))',
+          borderRadius: 16,
+          border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.16))',
           background: 'var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, #fff))',
-          boxShadow: '0 10px 32px rgba(0,0,0,.18)',
+          // 双层阴影：贴边一层勾出轮廓，远距一层把卡片托起来。单层要么太糊、
+          // 要么像硬描边，两层叠起来才是「浮着」的观感。
+          boxShadow: '0 1px 2px rgba(0,0,0,.06), 0 12px 34px -8px rgba(0,0,0,.22)',
           color: 'var(--dsw-alias-label-primary, inherit)',
           fontSize: 12,
           lineHeight: 1.45,
@@ -2041,11 +2090,50 @@ window.__ModuleLoader__.load({
         // flex 高度分配——它们都抢 flex-grow 会把渠道列表挤出可视区（实测
         // 表现为「退出设置后渠道列表被顶走，只剩分区」）。定高内容自然排。
         sectionWrap: mainSplit === null ? {} : { flex: '0 0 auto', minHeight: 0, overflowY: 'auto' },
+        // 大栏标题栏：左侧一根 3px 的高光条标身份，悬停由注入的样式表补背景。
+        // 内边距比数据行多 1px，标题栏看起来是「片」，数据行是「条」。
         wbHead: {
-          display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px',
-          cursor: 'pointer', fontSize: 11.5, fontWeight: 600,
+          display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px 5px',
+          cursor: 'pointer', fontSize: 11, fontWeight: 600,
         },
-        wbTitle: { whiteSpace: 'nowrap' },
+        // 窄窗下标题要让位给胶囊与折叠三角：允许压缩 + 省略号，不撑着溢出。
+        wbTitle: {
+          whiteSpace: 'nowrap', letterSpacing: '.01em',
+          minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
+        },
+        // 标题栏左侧的身份色条：比数据行的色条细一点，不与行内色条打架。
+        wbAccent: { width: 2.5, height: 12, flex: '0 0 2.5px', borderRadius: 2 },
+        // 折叠三角：展开朝下、收起朝右，旋转交给样式表的过渡。
+        caret: { fontSize: 9, opacity: .55, display: 'inline-block' },
+        // 限额进度条：细轨道 + 圆头填充。折叠态的迷你条只有 3px 高，展开态 4px。
+        barTrack: (height, width) => ({
+          height, width: width ?? '100%', flex: width === undefined ? '1 1 auto' : '0 0 auto',
+          borderRadius: 999, overflow: 'hidden', display: 'flex',
+          background: 'color-mix(in srgb, currentColor 14%, transparent)',
+        }),
+        // 百分比很小时条会缩成看不见的一点：给个最小宽度，让「还剩一点点」
+        // 这件事本身可见——归零才是真的没有。
+        barFill: percent => ({
+          width: `${Math.max(percent > 0 ? 3 : 0, Math.min(100, percent))}%`, borderRadius: 999,
+          transition: 'width .3s ease',
+        }),
+        // 折叠态的紧凑胶囊：轨道 + 半透明填充 + 压在中间的小字。
+        // 「5h 42%」这样一个胶囊同时给出窗口、余量和趋势，不额外占宽度。
+        // 胶囊：左边一小截进度条，右边百分比。比「整块填充 + 压字」读得快——
+        // 填充区做底时，短条的边界会和小字挤在一起。
+        chip: {
+          display: 'inline-flex', alignItems: 'center', gap: 4,
+          height: 15, flex: '0 0 auto', borderRadius: 999,
+          padding: '0 6px 0 5px',
+          background: 'color-mix(in srgb, currentColor 9%, transparent)',
+          fontSize: 9.5, fontVariantNumeric: 'tabular-nums', letterSpacing: '.01em',
+        },
+        chipBar: { width: 14, flex: '0 0 14px' },
+        chipFill: percent => ({
+          width: `${Math.max(0, Math.min(100, percent))}%`, borderRadius: 999,
+          background: 'currentColor', opacity: .55, transition: 'width .3s ease',
+        }),
+        chipText: { whiteSpace: 'nowrap', fontWeight: 500 },
         wbSum: {
           marginLeft: 'auto', fontSize: 10.5, fontWeight: 400,
           color: 'var(--dsw-alias-label-secondary, #888)', fontVariantNumeric: 'tabular-nums',
@@ -2220,7 +2308,7 @@ window.__ModuleLoader__.load({
             channels.length === 0
               ? h('div', { style: style.statsHint }, t('statsEmpty'))
               : channels.map(item => h('div', {
-                key: item.channel.id, style: style.statsRow, 'data-stats-channel': item.channel.id,
+                key: item.channel.id, style: style.statsRow, className: 'ofm-row', 'data-stats-channel': item.channel.id,
               },
                 h('span', { style: { ...style.stripe, background: item.channel.accent } }),
                 h('span', { style: style.statsNameCell },
@@ -2245,14 +2333,49 @@ window.__ModuleLoader__.load({
             h('span', { style: style.statsWbAmount }, '−' + formatAmount(wbAccumulatedTotal, 'credits'))),
         )
       })()
+      // 折叠三角：展开朝下、收起朝右，旋转由注入的样式表补过渡。
+      const caretOf = open => h('span', {
+        className: 'ofm-caret',
+        style: { ...style.caret, transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' },
+      }, '▾')
+
+      /**
+       * 限额进度条。
+       *
+       * 轨道用 currentColor 的弱化版，填充用档位实色：同一条在不同余量下
+       * 自己变色，不用另配一套背景。percent 为 null 时只画空轨道。
+       */
+      const barOf = (percent, height, width) => h('span', { style: style.barTrack(height, width) },
+        Number.isFinite(percent)
+          ? h('span', { style: { ...style.barFill(percent), background: barTone(percent) } })
+          : null)
+
+      /**
+       * 折叠态的限额胶囊：一条按百分比填充的底色 + 压在上面的「5h 42%」。
+       *
+       * 余量越少填充越短，档位色只在文字上体现——胶囊整体调成低饱和，免得
+       * 标题栏被三块高饱和色占满。percent 为 null 时只画空胶囊。
+       */
+      const chipOf = (label, percent) => h('span', {
+        style: style.chip,
+        title: label,
+        'data-codex-chip': label,
+      },
+        h('span', { style: { ...style.barTrack(3, undefined), ...style.chipBar } },
+          Number.isFinite(percent)
+            ? h('span', { style: { ...style.chipFill(percent), background: barTone(percent), opacity: 1 } })
+            : null),
+        h('span', { style: style.chipText }, `${label} ${Number.isFinite(percent) ? `${Math.round(percent)}%` : '—'}`))
+
       // ── WorkBuddy 分区 ──────────────────────────────────────────────────
       // 与渠道列表共用同一个滚动区：卡片拉高时一起滚，不额外占一条滚动条。
       // 头部常驻，折叠时只留汇总数字，展开才逐账号列。
       const wbTodaySum = sumSpend(wbRows.map(row => wbLedger.daily[row.key]))
       const wbSection = (() => {
         if (!wbConnected) {
-          return h('div', { style: style.wbWrap, 'data-ofm-credit-watch-wb': 'unavailable' },
-            h('div', { style: style.wbHead, title: t('wbUnavailable') },
+          return h('div', { style: style.wbWrap, className: 'ofm-section', 'data-ofm-credit-watch-wb': 'unavailable' },
+            h('div', { style: style.wbHead, className: 'ofm-head', title: t('wbUnavailable') },
+              h('span', { style: { ...style.wbAccent, background: '#615CED', opacity: .4 } }),
               h('span', { style: style.wbTitle }, t('wbTitle')),
               h('span', { style: { ...style.meta, marginLeft: 'auto' } }, t('wbUnavailable'))))
         }
@@ -2264,23 +2387,24 @@ window.__ModuleLoader__.load({
             return next
           })
         }
-        return h('div', { style: style.wbWrap, 'data-ofm-credit-watch-wb': 'section' },
+        return h('div', { style: { ...style.wbWrap }, className: 'ofm-section', 'data-ofm-credit-watch-wb': 'section' },
           h('div', {
-            style: style.wbHead, onClick: toggle, role: 'button',
+            style: style.wbHead, className: 'ofm-head', onClick: toggle, role: 'button',
             title: wbOpen ? t('wbCollapse') : t('wbExpand'),
             'aria-expanded': wbOpen ? 'true' : 'false',
           },
+            h('span', { style: { ...style.wbAccent, background: '#615CED' } }),
             h('span', { style: style.wbTitle }, t('wbTitle')),
             h('span', { style: style.wbSum },
               wbTodaySum === null ? '—' : `${t('wbToday')} −${formatAmount(wbTodaySum, 'credits')}`,
               // 今日 token：所有账号合起来一个数，与 cost-meter 面板口径一致。
               wbTokensToday === null ? '' : ` · ${formatTokens(wbTokensToday)}`),
-            h('span', { style: style.meta }, wbOpen ? '▾' : '▸')),
+            caretOf(wbOpen)),
           wbRows.length === 0
             ? h('div', { style: style.wbEmpty }, t('wbNoAccounts'))
             : !wbOpen ? null : wbRows.map(row => {
               const usedToday = wbLedger.daily[row.key]
-              return h('div', { key: row.key, style: style.wbRow, 'data-wb-account': row.key },
+              return h('div', { key: row.key, style: style.wbRow, className: 'ofm-row', 'data-wb-account': row.key },
                 // 与渠道行同宽的空色条：让「今日」「余额」两列和上面严格对齐。
                 h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
                 h('span', { style: style.wbNameCell },
@@ -2315,12 +2439,13 @@ window.__ModuleLoader__.load({
         }
         const today = beichenToday ?? {}
         const spent = `−$${Number(today.actualCost ?? 0).toFixed(2)}`
-        return h('div', { style: style.wbWrap, style: style.sectionWrap, 'data-ofm-credit-watch-beichen': 'section' },
+        return h('div', { style: { ...style.wbWrap, ...style.sectionWrap }, className: 'ofm-section', 'data-ofm-credit-watch-beichen': 'section' },
           h('div', {
-            style: style.wbHead, onClick: toggle, role: 'button',
+            style: style.wbHead, className: 'ofm-head', onClick: toggle, role: 'button',
             title: beichenOpen ? t('wbCollapse') : t('wbExpand'),
             'aria-expanded': beichenOpen ? 'true' : 'false',
           },
+            h('span', { style: { ...style.wbAccent, background: '#4C8DFF' } }),
             h('span', { style: style.wbTitle }, t('beichenName')),
             // 余额跟标题一起左对齐：折叠时最想看的就是「还剩多少」，
             // 它不该藏在展开之后。颜色沿用余额告警档位。
@@ -2334,10 +2459,10 @@ window.__ModuleLoader__.load({
             h('span', { style: { ...style.wbSum, marginLeft: 0 } }, beichenToday === null
               ? t('beichenNoData')
               : `${t('wbToday')} ${spent} · ${formatTokens(today.totalTokens ?? 0)}`),
-            h('span', { style: style.meta }, beichenOpen ? '▾' : '▸')),
+            caretOf(beichenOpen)),
           !beichenOpen ? null : h('div', null,
             // 余额行：与上面渠道行同宽的空色条，让两列对齐到同一条竖线。
-            h('div', { style: style.wbRow, 'data-beichen-row': 'balance' },
+            h('div', { style: style.wbRow, className: 'ofm-row', 'data-beichen-row': 'balance' },
               h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
               h('span', { style: style.wbNameCell },
                 h('span', { style: style.wbName }, t('beichenBalance')),
@@ -2346,7 +2471,7 @@ window.__ModuleLoader__.load({
               h('span', { style: { ...style.wbAmount, color: TONE[toneOf(beichenBalance, 'USD')] } },
                 formatAmount(beichenBalance, 'USD'))),
             // 用量行：今日 token 与扣费。缓存读取单独列出来，钱主要花在这上面。
-            h('div', { style: style.wbRow, 'data-beichen-row': 'tokens' },
+            h('div', { style: style.wbRow, className: 'ofm-row', 'data-beichen-row': 'tokens' },
               h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
               h('span', { style: style.wbNameCell },
                 h('span', { style: style.wbName }, t('beichenTokens')),
@@ -2433,23 +2558,39 @@ window.__ModuleLoader__.load({
         const summary = codexFiveHour === null && codexWeekly === null ? t('codexUnavailable')
           : [codexFiveHour, codexWeekly].map((row, index) =>
             row === null ? null : `${index === 0 ? t('codexFiveHour') : t('codexWeekly')} ${pct(row)}`).filter(Boolean).join(' · ')
-        return h('div', { style: style.wbWrap, style: style.sectionWrap, 'data-ofm-credit-watch-codex': 'section' },
+        return h('div', { style: { ...style.wbWrap, ...style.sectionWrap }, className: 'ofm-section', 'data-ofm-credit-watch-codex': 'section' },
           h('div', {
-            style: style.wbHead, onClick: toggle, role: 'button',
+            style: style.wbHead, className: 'ofm-head', onClick: toggle, role: 'button',
             title: codexTitle,
             'aria-expanded': codexOpen ? 'true' : 'false',
           },
+            h('span', { style: { ...style.wbAccent, background: 'var(--dsw-alias-brand-primary, #4b7bec)' } }),
             h('span', { style: style.wbTitle }, t('codexName')),
-            h('span', { style: style.wbSum }, summary),
-            h('span', { style: style.meta }, codexOpen ? '▾' : '▸')),
+            // 折叠时也要看得见余量趋势：两个胶囊代替原来的一行文字，
+            // 条长就是余量比例。两个窗口都缺时退回占位文字。
+            codexFiveHour === null && codexWeekly === null
+              ? h('span', { style: { ...style.wbSum, marginLeft: 'auto' } }, summary)
+              : h('span', {
+                style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4, flex: '0 0 auto' },
+                'data-codex-chips': 'title',
+              },
+                codexFiveHour === null ? null : chipOf(t('codexChipFiveHour'), codexFiveHour.remainingPercent),
+                codexWeekly === null ? null : chipOf(t('codexChipWeekly'), codexWeekly.remainingPercent)),
+            caretOf(codexOpen)),
           !codexOpen ? null : [codexFiveHour, codexWeekly].map((row, index) => row === null ? null : h('div', {
-            key: index, style: style.wbRow, 'data-codex-row': index === 0 ? 'fiveHour' : 'weekly',
+            key: index,
+            // 明细行比标题栏多缩进 8px：层级上它是「GPT 订阅」的下级。
+            style: { ...style.wbRow, paddingLeft: 18 },
+            className: 'ofm-row',
+            'data-codex-row': index === 0 ? 'fiveHour' : 'weekly',
           },
             h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
             h('span', { style: style.wbNameCell },
               h('span', { style: style.wbName }, index === 0 ? t('codexFiveHour') : t('codexWeekly')),
               h('span', { style: style.meta }, resetWhen(row))),
-            h('span', { style: style.wbCell }, '·'),
+            // 进度条占中间那列：百分比数字在右，条在左，扫一眼就知道还剩多少。
+            h('span', { style: { display: 'flex', alignItems: 'center' } },
+              barOf(row.remainingPercent, 4)),
             h('span', { style: { ...style.wbAmount, color: TONE[row.remainingPercent <= 10 ? 'danger' : row.remainingPercent <= 25 ? 'warn' : 'ok'] } },
               pct(row)))))
       })()
@@ -2479,21 +2620,22 @@ window.__ModuleLoader__.load({
       const ofmTotalTokens = ofmTokens?.total === null || ofmTokens?.total === undefined ? null
         : (ofmTokens.total.input + ofmTokens.total.output + ofmTokens.total.cacheRead)
       const ofmSection = ofmTokens === null || ofmTokens.available === false || hiddenSections.has('ofm') ? null
-        : h('div', { style: style.sectionWrap, 'data-ofm-credit-watch-ofm': 'section' },
+        : h('div', { style: { ...style.sectionWrap }, className: 'ofm-section', 'data-ofm-credit-watch-ofm': 'section' },
           h('div', {
-            style: style.wbHead, onClick: () => { resetAutoHeight(); setOfmOpen(open => !open) }, role: 'button',
+            style: style.wbHead, className: 'ofm-head', onClick: () => { resetAutoHeight(); setOfmOpen(open => !open) }, role: 'button',
             title: ofmOpen ? t('wbCollapse') : t('wbExpand'),
             'aria-expanded': ofmOpen ? 'true' : 'false',
           },
+            h('span', { style: { ...style.wbAccent, background: '#00BFA6' } }),
             h('span', { style: style.wbTitle }, t('ofmName')),
             h('span', { style: style.wbSum },
               ofmTokens.day === null ? t('ofmTokensEmpty')
                 : ofmTotalTokens === null ? '—' : `${formatTokens(ofmTotalTokens)} tok`),
-            h('span', { style: style.meta }, ofmOpen ? '▾' : '▸')),
+            caretOf(ofmOpen)),
           !ofmOpen ? null : ofmChannelRows.length === 0
             ? h('div', { style: style.wbEmpty }, t('ofmTokensEmpty'))
             : ofmChannelRows.map(row => h('div', {
-              key: row.channel, style: style.wbRow, 'data-ofm-token-row': row.channel,
+              key: row.channel, style: style.wbRow, className: 'ofm-row', 'data-ofm-token-row': row.channel,
             },
               h('span', { style: { ...style.stripe, background: row.accent } }),
               h('span', { style: style.wbNameCell },

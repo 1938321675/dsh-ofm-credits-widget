@@ -667,6 +667,50 @@ check('收起时不显示配置面板',
   check('没有窗口时提示保留展开说明',
     titleOf({ [IDX.codex]: { available: true, windows: [] }, [IDX.codexOpen]: false }), '点一下展开明细')
 
+  // ── 视觉层：折叠态胶囊、展开态进度条 ──
+  /** 取折叠标题栏里的两个限额胶囊。 */
+  const chipsOf = tree => flatten(tree).filter(node =>
+    node.props !== undefined && node.props['data-codex-chip'] !== undefined).map(node => node.props['data-codex-chip'])
+  check('折叠态给出两个限额胶囊', chipsOf(render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.hiddenSections]: new Set(),
+    [IDX.now]: NOW, [IDX.codex]: codexReading, [IDX.codexOpen]: false,
+  })), ['5h', '1w'])
+
+  // 胶囊里的填充宽度就是剩余百分比：条长与数字是同一个数，不会互相打架。
+  const fillOf = tree => flatten(tree)
+    .filter(node => node.props?.style?.width !== undefined && typeof node.props.style.width === 'string' && node.props.style.width.endsWith('%'))
+    .map(node => node.props.style.width)
+  check('胶囊填充按剩余百分比', fillOf(render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.hiddenSections]: new Set(),
+    [IDX.now]: NOW, [IDX.codex]: codexReading, [IDX.codexOpen]: false,
+  })).slice(0, 2), ['63%', '94%'])
+
+  // 展开态每行一条进度条：填充宽度与百分比一致。
+  check('展开态明细行带进度条', fillOf(render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.hiddenSections]: new Set(),
+    [IDX.now]: NOW, [IDX.codex]: codexReading, [IDX.codexOpen]: true,
+  })).includes('63%'), true)
+
+  // 低余量保底：条再短也留 3% 可见，免得「还剩一点」缩成看不见。
+  check('极低余量仍留最小可见宽度', fillOf(render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.hiddenSections]: new Set(),
+    [IDX.now]: NOW, [IDX.codexOpen]: true,
+    [IDX.codex]: { available: true, windows: [{ kind: 'fiveHour', remainingPercent: 0.5, resetsAt: NOW + 60_000, sampledAt: NOW }] },
+  })).includes('3%'), true)
+
+  // 四个大栏都带身份色条与折叠三角，视觉语言统一。
+  check('四个大栏都有折叠三角',
+    ['wb', 'beichen', 'codex', 'ofm'].map(key => {
+      const tree = render({
+        [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.hiddenSections]: new Set(),
+        [IDX.wbRows]: wbRows(), [IDX.wbConnected]: true, [IDX.beichen]: beichenReading,
+        [IDX.codex]: codexReading, [IDX.ofmTokens]: ofmReading,
+      })
+      const wrap = flatten(tree).find(node => node.props !== undefined && node.props[`data-ofm-credit-watch-${key}`] !== undefined)
+      const head = wrap === undefined ? undefined : (wrap.children || [])[0]
+      return flatten(head).some(node => node.props?.className === 'ofm-caret')
+    }), [true, true, true, true])
+
   // 英文界面：日期用月份缩写，措辞跟着换。
   const enLines = titleOf({ [IDX.lang]: 'en' }).split('\n')
   check('英文界面的周窗重置时刻', enLines[3], '  resets at Nov 25, 08:35 (7 days left)')
