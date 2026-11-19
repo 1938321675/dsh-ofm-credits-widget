@@ -623,6 +623,56 @@ check('收起时不显示配置面板',
   store.delete("ofm-credit-watch.size")
 }
 
+// ── GPT 订阅栏悬浮提示：不展开也能看到重置时刻 ─────────────────────────────
+// 折叠时标题栏只有百分比，重置时间原来要展开才看得到。现在鼠标停在标题栏上
+// 就给多行提示：每个窗口的剩余与重置时刻（绝对时间 + 还剩多久），末尾给
+// 采样时刻与动作提示。这里注入固定「现在」，把提示文本逐行对出来。
+{
+  const NOW = 1_794_969_184_707
+  /** 取 GPT 分区的可点标题栏。 */
+  const codexHeadOf = tree => {
+    const wrap = flatten(tree).find(node => node.props !== undefined && node.props['data-ofm-credit-watch-codex'] !== undefined)
+    return wrap === undefined ? undefined : (wrap.children || [])[0]
+  }
+  const titleOf = overrides => codexHeadOf(render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.hiddenSections]: new Set(), [IDX.now]: NOW,
+    [IDX.codex]: codexReading, ...overrides,
+  }))?.props?.title ?? ''
+
+  const folded = titleOf({ [IDX.codexOpen]: false })
+  const lines = folded.split('\n')
+  check('折叠时标题栏带多行提示', lines.length >= 4, true)
+  check('提示给 5 小时窗剩余', lines[0], '5 小时　剩余 63%')
+  check('提示给 5 小时窗重置时刻与倒计时', lines[1], '　重置于 今天 13:35（还有 3 小时）')
+  check('提示给周窗剩余', lines[2], '本周　剩余 94%')
+  check('提示给周窗重置时刻与倒计时', lines[3], '　重置于 11月25日 08:35（还有 7 天）')
+  check('提示给采样时刻', lines[4], '采样于 今天 10:33，每分钟刷新')
+  check('折叠时提示动作是展开', lines[5], '点一下展开明细')
+  check('展开时提示动作是收起', titleOf({ [IDX.codexOpen]: true }).split('\n').at(-1), '点一下收起明细')
+
+  // 已经过了重置时刻：改说「即将重置」，不再给负数倒计时。
+  check('已过重置时刻只说即将重置',
+    titleOf({ [IDX.codex]: { available: true, windows: [
+      { kind: 'fiveHour', remainingPercent: 12, resetsAt: NOW - 60_000, sampledAt: NOW - 30_000 },
+    ] } }).split('\n')[1], '　即将重置')
+
+  // 上游没给重置时间：明说没有，不显示空括号。
+  check('没有重置时间时明说没有',
+    titleOf({ [IDX.codex]: { available: true, windows: [
+      { kind: 'fiveHour', remainingPercent: 40, resetsAt: null, sampledAt: NOW - 30_000 },
+    ] } }).split('\n')[1], '　没有给出重置时间')
+
+  // 快照里一个窗口都没有：提示回到单纯的展开说明，不留空提示。
+  check('没有窗口时提示保留展开说明',
+    titleOf({ [IDX.codex]: { available: true, windows: [] }, [IDX.codexOpen]: false }), '点一下展开明细')
+
+  // 英文界面：日期用月份缩写，措辞跟着换。
+  const enLines = titleOf({ [IDX.lang]: 'en' }).split('\n')
+  check('英文界面的周窗重置时刻', enLines[3], '  resets at Nov 25, 08:35 (7 days left)')
+  check('英文界面的采样行', enLines[4], 'sampled at today 10:33, refreshed every minute')
+}
+
 // ── 13. 端到端：拖上边动的必须是上边界 ───────────────────────────────────
 // 回归测试。位置状态曾经只手拼了 relRight、丢掉 anchor.top，于是拉上边表现
 // 成"下边界下移"：高度变大了，上边界却留在原地。这里驱动真的

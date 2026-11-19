@@ -263,6 +263,15 @@ window.__ModuleLoader__.load({
         codexResets: '{when}重置',
         codexResetSoon: '即将重置',
         codexUnavailable: '未连接 GPT 订阅',
+        codexTipReset: '　重置于 {when}（还有 {left}）',
+        codexTipResetNow: '　即将重置',
+        codexTipNoReset: '　没有给出重置时间',
+        codexTipSampled: '采样于 {when}，每分钟刷新',
+        codexTipExpand: '点一下展开明细',
+        codexTipCollapse: '点一下收起明细',
+        codexWhenToday: '今天 {time}',
+        codexWhenTomorrow: '明天 {time}',
+        codexWhenDate: '{month}月{day}日 {time}',
         ofmName: 'OFM 模型',
         ofmTokensEmpty: '今天还没有调用',
         ofmCalls: '{count} 次调用',
@@ -354,6 +363,15 @@ window.__ModuleLoader__.load({
         codexResets: 'resets {when}',
         codexResetSoon: 'resets soon',
         codexUnavailable: 'GPT subscription not connected',
+        codexTipReset: '  resets at {when} ({left} left)',
+        codexTipResetNow: '  resets soon',
+        codexTipNoReset: '  no reset time given',
+        codexTipSampled: 'sampled at {when}, refreshed every minute',
+        codexTipExpand: 'click to expand details',
+        codexTipCollapse: 'click to collapse details',
+        codexWhenToday: 'today {time}',
+        codexWhenTomorrow: 'tomorrow {time}',
+        codexWhenDate: '{month} {day}, {time}',
         ofmName: 'OFM models',
         ofmTokensEmpty: 'No calls today',
         ofmCalls: '{count} calls',
@@ -464,18 +482,28 @@ window.__ModuleLoader__.load({
       return 'ok'
     }
 
-    /** 把毫秒差写成「刚刚 / 42 秒 / 3 分钟 / 2 小时」这类短语。 */
-    function span(ms) {
+    /**
+     * 把毫秒差写成「刚刚 / 42 秒 / 3 分钟 / 2 小时」这类短语。
+     *
+     * 第二个参数给 'en' 时用英文单复数：倒计时会嵌进英文句子里，中英混排的
+     * 「(7 天 left)」读起来是断的。不传就跟原来一样是中文。
+     */
+    function span(ms, locale) {
       if (!Number.isFinite(ms) || ms < 0) return ''
+      const en = locale === 'en'
+      const unit = (count, one, many) => `${count} ${count === 1 ? one : many}`
       const sec = Math.round(ms / 1000)
       if (sec < 5) return ''
-      if (sec < 60) return `${sec} 秒`
+      if (sec < 60) return en ? unit(sec, 'second', 'seconds') : `${sec} 秒`
       const min = Math.round(sec / 60)
-      if (min < 60) return `${min} 分钟`
+      if (min < 60) return en ? unit(min, 'minute', 'minutes') : `${min} 分钟`
       const hour = Math.round(min / 60)
-      if (hour < 24) return `${hour} 小时`
-      return `${Math.round(hour / 24)} 天`
+      if (hour < 24) return en ? unit(hour, 'hour', 'hours') : `${hour} 小时`
+      return en ? unit(Math.round(hour / 24), 'day', 'days') : `${Math.round(hour / 24)} 天`
     }
+
+    /** 英文月份缩写：悬浮提示里的绝对时间跟随界面语言。 */
+    const MONTHS_EN = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
     const round2 = value => Math.round(value * 100) / 100
 
@@ -1787,7 +1815,7 @@ window.__ModuleLoader__.load({
       const headerWhen = updatedAt === 0 ? t('never')
         : (() => {
           const age = now - updatedAt
-          const phrase = span(age)
+          const phrase = span(age, lang)
           return phrase === '' ? t('now') : fill(t('ago'), { when: phrase })
         })()
 
@@ -2339,9 +2367,60 @@ window.__ModuleLoader__.load({
         if (row === null || !Number.isFinite(row.resetsAt)) return ''
         const ms = row.resetsAt - now
         if (ms <= 0) return t('codexResetSoon')
-        return fill(t('codexResets'), { when: span(ms) })
+        return fill(t('codexResets'), { when: span(ms, lang) })
       }
       const pct = row => row === null ? '—' : `${Math.round(row.remainingPercent)}%`
+      /**
+       * 悬浮提示里的绝对时刻。
+       *
+       * 只有相对时长（「27 分钟后」）看不出一件事什么时候发生，只有绝对时刻又
+       * 要自己心算还剩多久，所以两样都给。近两天用「今天 / 明天 + 时刻」，
+       * 更远给日期，省得提示太长。
+       */
+      const clockOf = ms => {
+        const at = new Date(ms)
+        return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+      }
+      const whenOf = ms => {
+        const at = new Date(ms)
+        const base = new Date(now)
+        const dayOf = date => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+        const days = Math.round((dayOf(at) - dayOf(base)) / 86_400_000)
+        const time = clockOf(ms)
+        if (days === 0) return fill(t('codexWhenToday'), { time })
+        if (days === 1) return fill(t('codexWhenTomorrow'), { time })
+        const month = lang === 'en' ? MONTHS_EN[at.getMonth()] ?? '' : String(at.getMonth() + 1)
+        return fill(t('codexWhenDate'), { month, day: at.getDate(), time })
+      }
+      /**
+       * GPT 订阅栏的多行悬浮提示：每个窗口一段「剩余 + 重置于何时」，末尾补一行
+       * 采样时刻与动作提示。折叠时只在标题栏给百分比，重置时间要展开才看得到；
+       * 鼠标停上去就能看到，不用展开占高度。
+       */
+      const codexTitle = (() => {
+        const line = []
+        // 中文用全角空格对齐，英文用冒号更自然。
+        const sep = lang === 'en' ? ': ' : '　'
+        const addRow = (row, label) => {
+          if (row === null) return
+          line.push(`${label}${sep}${fill(t('codexRemaining'), { value: pct(row) })}`)
+          if (!Number.isFinite(row.resetsAt)) { line.push(t('codexTipNoReset')); return }
+          const ms = row.resetsAt - now
+          if (ms <= 0) { line.push(t('codexTipResetNow')); return }
+          const left = span(ms, lang)
+          line.push(left === ''
+            ? t('codexTipResetNow')
+            : fill(t('codexTipReset'), { when: whenOf(row.resetsAt), left }))
+        }
+        addRow(codexFiveHour, t('codexFiveHour'))
+        addRow(codexWeekly, t('codexWeekly'))
+        // 快照里两个窗口都没有时不给空提示，否则标题栏连展开说明也一起没了。
+        if (line.length === 0) return codexOpen ? t('codexTipCollapse') : t('codexTipExpand')
+        const sampled = codexFiveHour?.sampledAt ?? codexWeekly?.sampledAt
+        if (Number.isFinite(sampled)) line.push(fill(t('codexTipSampled'), { when: whenOf(sampled) }))
+        line.push(codexOpen ? t('codexTipCollapse') : t('codexTipExpand'))
+        return line.join('\n')
+      })()
       const codexSection = codex === null || codex.available === false || hiddenSections.has('codex') ? null : (() => {
         const toggle = () => {
           resetAutoHeight()
@@ -2357,7 +2436,7 @@ window.__ModuleLoader__.load({
         return h('div', { style: style.wbWrap, style: style.sectionWrap, 'data-ofm-credit-watch-codex': 'section' },
           h('div', {
             style: style.wbHead, onClick: toggle, role: 'button',
-            title: codexOpen ? t('wbCollapse') : t('wbExpand'),
+            title: codexTitle,
             'aria-expanded': codexOpen ? 'true' : 'false',
           },
             h('span', { style: style.wbTitle }, t('codexName')),

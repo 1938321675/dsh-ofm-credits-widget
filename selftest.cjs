@@ -83,6 +83,8 @@ check('kilo(null)', t.kilo(null), '—')
 check('span(1000)', t.span(1000), '')
 check('span(42000)', t.span(42000), '42 秒')
 check('span(180000)', t.span(180000), '3 分钟')
+check('span 英文单数', t.span(180000, 'en'), '3 minutes')
+check('span 英文一天', t.span(86_400_000, 'en'), '1 day')
 check('fill', t.fill('{a} 个账号 / {b}', { a: 2, b: 'x' }), '2 个账号 / x')
 check('fill 不吞未知占位符', t.fill('{a}-{nope}', { a: 1 }), '1-{nope}')
 
