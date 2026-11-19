@@ -560,6 +560,69 @@ check('收起时不显示配置面板',
     nodes({ [IDX.hidden]: true }).filter(node => node.props?.['data-ofm-credit-watch-handle'] !== undefined).length, 0)
 }
 
+// ── 14. 大栏折叠/展开把固定高度重置为自适应 ──────────────────────────────
+// 固定高度下切换大栏看不出高度变化，所以折叠/展开时把高度放回自适应；
+// 内容区仍封顶 320px，展开再多也让内容自己滚，卡片不会长满一屏。
+{
+  /** 取某个大栏的标题栏：包裹层的第一个子节点就是可点的头部。 */
+  const headOf = (tree, key) => {
+    const wrap = flatten(tree).find(node => node.props !== undefined && node.props[`data-ofm-credit-watch-${key}`] !== undefined)
+    return wrap === undefined ? undefined : (wrap.children || [])[0]
+  }
+
+  // 第一项是大栏在 DOM 上的标记后缀，第二项是给人看的名字。
+  // WorkBuddy 的标记是 wb 而不是 workbuddy，两者不同源。
+  const sections = [
+    ['wb', 'workbuddy', { [IDX.wbRows]: wbRows(), [IDX.wbConnected]: true }],
+    ['beichen', 'beichen', { [IDX.beichen]: beichenReading }],
+    ['codex', 'codex', { [IDX.codex]: codexReading }],
+    ['ofm', 'ofm', { [IDX.ofmTokens]: ofmReading }],
+  ]
+
+  for (const [key, label, extra] of sections) {
+    store.delete("ofm-credit-watch.size")
+    const tree = render({
+      [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+      [IDX.hiddenSections]: new Set(),
+      [IDX.size]: { width: 340, height: 320 },
+      ...extra,
+    })
+    const head = headOf(tree, key)
+    check(`${label} 大栏标题栏可点`, typeof head?.props?.onClick, "function")
+    head.props.onClick({ stopPropagation() {} })
+    check(`${label} 大栏折叠/展开后高度回到自适应`, hooks[IDX.size].height, null)
+    check(`${label} 大栏折叠/展开保留宽度`, hooks[IDX.size].width, 340)
+    const saved = JSON.parse(store.get("ofm-credit-watch.size") ?? "null")
+    check(`${label} 大栏切换把自适应高度落盘`, saved?.height, null)
+    store.delete("ofm-credit-watch.size")
+  }
+
+  // 本来就自适应：点一下不该产生尺寸写盘。
+  store.delete("ofm-credit-watch.size")
+  const auto = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.hiddenSections]: new Set(),
+    [IDX.size]: { width: 340, height: null }, [IDX.ofmTokens]: ofmReading,
+  })
+  headOf(auto, "ofm").props.onClick({ stopPropagation() {} })
+  check("自适应时切换大栏不重复写尺寸", store.has("ofm-credit-watch.size"), false)
+  check("自适应时切换大栏高度仍为自适应", hooks[IDX.size].height, null)
+
+  // 自适应高度下内容区封顶 320：内容再多也让内容区自己滚。
+  const autoBody = flatten(auto).find(node => node.props?.["data-ofm-credit-watch-body"] !== undefined)
+  check("自适应时内容区封顶 320px", autoBody?.props.style.maxHeight, 320)
+  check("自适应时内容区自身滚动", autoBody?.props.style.overflowY, "auto")
+
+  // 拉过右下角之后内容区吃满剩余高度，不再受 320 限制。
+  const fixed = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.hiddenSections]: new Set(),
+    [IDX.size]: { width: 340, height: 600 }, [IDX.ofmTokens]: ofmReading,
+  })
+  const fixedBody = flatten(fixed).find(node => node.props?.["data-ofm-credit-watch-body"] !== undefined)
+  check("固定高度时内容区不限高", fixedBody?.props.style.maxHeight, undefined)
+  check("固定高度时内容区吃满剩余空间", fixedBody?.props.style.flex, "1 1 auto")
+  store.delete("ofm-credit-watch.size")
+}
+
 // ── 13. 端到端：拖上边动的必须是上边界 ───────────────────────────────────
 // 回归测试。位置状态曾经只手拼了 relRight、丢掉 anchor.top，于是拉上边表现
 // 成"下边界下移"：高度变大了，上边界却留在原地。这里驱动真的

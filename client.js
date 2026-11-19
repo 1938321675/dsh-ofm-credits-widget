@@ -1264,6 +1264,21 @@ window.__ModuleLoader__.load({
       }, [collapsed])
 
       /**
+       * 大栏折叠/展开后，把手动拉出的固定高度重置为自适应。
+       *
+       * 固定高度下大栏切换不会改变卡片高度，内容只在固定框里滚动，用户
+       * 看不到「展开变大、折叠变小」的联动。重置成自适应后，高度回到
+       * 「标题栏 + 内容（内容区仍封顶 320px）」的随内容模型，切换大栏才有
+       * 可见变化。本就处于自适应时直接返回，不触发多余渲染与写盘。
+       */
+      const resetAutoHeight = useCallback(() => {
+        if (size.height === null) return
+        const next = { ...size, height: null }
+        setSize(next)
+        saveSize(next)
+      }, [size])
+
+      /**
        * 写回隐藏集合。先更新界面再落盘：即使 localStorage 不可用（隐私模式、
        * 沙盒 iframe），本次会话内的勾选也要立刻生效。
        */
@@ -2213,11 +2228,14 @@ window.__ModuleLoader__.load({
               h('span', { style: style.wbTitle }, t('wbTitle')),
               h('span', { style: { ...style.meta, marginLeft: 'auto' } }, t('wbUnavailable'))))
         }
-        const toggle = () => setWbOpen(open => {
-          const next = !open
-          try { window.localStorage?.setItem(WB_OPEN_KEY, next ? '1' : '0') } catch { /* 存储不可用 */ }
-          return next
-        })
+        const toggle = () => {
+          resetAutoHeight()
+          setWbOpen(open => {
+            const next = !open
+            try { window.localStorage?.setItem(WB_OPEN_KEY, next ? '1' : '0') } catch { /* 存储不可用 */ }
+            return next
+          })
+        }
         return h('div', { style: style.wbWrap, 'data-ofm-credit-watch-wb': 'section' },
           h('div', {
             style: style.wbHead, onClick: toggle, role: 'button',
@@ -2259,11 +2277,14 @@ window.__ModuleLoader__.load({
       // channel-pack 的渠道，所以不进上面的渠道列表——否则「几个渠道有余额」
       // 这类汇总会被一个口径完全不同的上游污染。
       const beichenSection = beichenBalance === null || hiddenSections.has('beichen') ? null : (() => {
-        const toggle = () => setBeichenOpen(open => {
-          const next = !open
-          try { window.localStorage?.setItem(BEICHEN_OPEN_KEY, next ? '1' : '0') } catch { /* 存储不可用 */ }
-          return next
-        })
+        const toggle = () => {
+          resetAutoHeight()
+          setBeichenOpen(open => {
+            const next = !open
+            try { window.localStorage?.setItem(BEICHEN_OPEN_KEY, next ? '1' : '0') } catch { /* 存储不可用 */ }
+            return next
+          })
+        }
         const today = beichenToday ?? {}
         const spent = `−$${Number(today.actualCost ?? 0).toFixed(2)}`
         return h('div', { style: style.wbWrap, style: style.sectionWrap, 'data-ofm-credit-watch-beichen': 'section' },
@@ -2322,11 +2343,14 @@ window.__ModuleLoader__.load({
       }
       const pct = row => row === null ? '—' : `${Math.round(row.remainingPercent)}%`
       const codexSection = codex === null || codex.available === false || hiddenSections.has('codex') ? null : (() => {
-        const toggle = () => setCodexOpen(open => {
-          const next = !open
-          try { window.localStorage?.setItem(CODEX_OPEN_KEY, next ? '1' : '0') } catch { /* 存储不可用 */ }
-          return next
-        })
+        const toggle = () => {
+          resetAutoHeight()
+          setCodexOpen(open => {
+            const next = !open
+            try { window.localStorage?.setItem(CODEX_OPEN_KEY, next ? '1' : '0') } catch { /* 存储不可用 */ }
+            return next
+          })
+        }
         const summary = codexFiveHour === null && codexWeekly === null ? t('codexUnavailable')
           : [codexFiveHour, codexWeekly].map((row, index) =>
             row === null ? null : `${index === 0 ? t('codexFiveHour') : t('codexWeekly')} ${pct(row)}`).filter(Boolean).join(' · ')
@@ -2378,7 +2402,7 @@ window.__ModuleLoader__.load({
       const ofmSection = ofmTokens === null || ofmTokens.available === false || hiddenSections.has('ofm') ? null
         : h('div', { style: style.sectionWrap, 'data-ofm-credit-watch-ofm': 'section' },
           h('div', {
-            style: style.wbHead, onClick: () => setOfmOpen(open => !open), role: 'button',
+            style: style.wbHead, onClick: () => { resetAutoHeight(); setOfmOpen(open => !open) }, role: 'button',
             title: ofmOpen ? t('wbCollapse') : t('wbExpand'),
             'aria-expanded': ofmOpen ? 'true' : 'false',
           },
@@ -2509,7 +2533,7 @@ window.__ModuleLoader__.load({
             onPointerDown: event => event.stopPropagation(),
             onClick: event => { event.stopPropagation(); setHidden(true) },
           }, '✕')),
-        collapsed ? null : h('div', { style: style.body },
+        collapsed ? null : h('div', { style: style.body, 'data-ofm-credit-watch-body': 'true' },
           // 统计视图：整块替换掉渠道列表与 WorkBuddy 分区。
           view === 'stats' ? statsSection
           // 设置视图：同样整块独占。勾选表本身就是「哪些渠道要显示」的清单，
