@@ -29,7 +29,7 @@
  * @module dsh-ofm-credit-watch
  */
 
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
@@ -363,6 +363,168 @@ const OFM_PROVIDERS = [
 /** WorkBuddy 两个区域的前缀；面板把它们合成一个总数。 */
 const WORKBUDDY_PROVIDERS = ['workbuddy', 'workbuddy-global']
 
+// ── 自带用量账本（不依赖 cost-meter）────────────────────────────────────────
+/**
+ * 自己记一份 OFM 渠道的 token 用量。
+ *
+ * 面板原本读 cost-meter 的账本，但那是另一个插件的数据——它被停用、升级
+ * 换格式或还没写盘时，这栏就没有数据可读。这里改为直接挂宿主自己的
+ * `llm/stream` 钩子：每次模型调用结束都会带一个 usage 块（inputTokens /
+ * outputTokens / cacheReadTokens 等），当场累加到本地账本。
+ *
+ * 口径与 cost-meter 一致：OFM 的十个渠道与免费车道按渠道分开记，WorkBuddy
+ * 两个区域合成一个总数——主界面那行给的是「所有账号的今日 token 合计」。
+ *
+ * 文件：`ofm-tokens-YYYY-MM-DD.json`，每天一份，跨天自动换文件。
+ */
+function tokensFile(date) {
+  return path.join(ledgerDir(), `ofm-tokens-${date}.json`)
+}
+
+/**
+ * usage 块 → 五桶。字段名以宿主 usage 块为准，缺项按 0。
+ *
+ * 只取这四项：reasoning 已经包含在 output 里，重复相加会把 output 算两遍。
+ */
+function bucketsOf(usage) {
+  const n = value => (Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : 0)
+  return {
+    input: n(usage?.inputTokens),
+    output: n(usage?.outputTokens),
+    cacheRead: n(usage?.cacheReadTokens),
+  }
+}
+
+/**
+ * 记一次调用。
+ *
+ * 只有 OFM 渠道才入账：provider 是渠道 id 本身。宿主在瀑布各层可能重复
+ * 派发同一个 usage（包装路由），所以按 (provider, model, 三桶) 做 10 秒窗口
+ * 去重——与 cost-meter 的指纹窗口同一思路，避免同一笔调用记两次。
+ */
+const TOKEN_DEDUP_MS = 10_000
+const tokenSeen = new Map()
+
+function dedupToken(sessionId, provider, model, buckets, atMs) {
+  const fingerprint = JSON.stringify([sessionId ?? '', provider, model ?? '', buckets.input, buckets.output, buckets.cacheRead])
+  const previous = tokenSeen.get(fingerprint)
+  if (previous !== undefined && Math.abs(atMs - previous) < TOKEN_DEDUP_MS) return false
+  tokenSeen.set(fingerprint, atMs)
+  // 清掉过期指纹：这张表一分钟就能涨到几百条，不定期扫会一直涨。
+  if (tokenSeen.size > 512) {
+    for (const [key, at] of tokenSeen) {
+      if (Math.abs(atMs - at) >= TOKEN_DEDUP_MS) tokenSeen.delete(key)
+    }
+  }
+  return true
+}
+
+function recordTokenUsage(provider, model, sessionId, usage, atMs) {
+  if (typeof provider !== 'string' || provider === '') return
+  const isOfm = OFM_PROVIDERS.includes(provider) || provider === 'our-free-model'
+  const isWorkBuddy = WORKBUDDY_PROVIDERS.includes(provider)
+  if (!isOfm && !isWorkBuddy) return
+  const buckets = bucketsOf(usage)
+  if (buckets.input === 0 && buckets.output === 0 && buckets.cacheRead === 0) return
+  if (!dedupToken(sessionId, provider, model, buckets, atMs)) return
+
+  const date = todayKey()
+  const file = tokensFile(date)
+  const state = readJson(file, null)
+  const record = state && state.date === date && typeof state.channels === 'object' && state.channels !== null
+    ? state : { date, channels: {}, workbuddy: { input: 0, output: 0, cacheRead: 0, calls: 0 } }
+  // OFM 渠道逐渠道记；WorkBuddy 两个区域按一个合计桶记，主界面就显示这个合计。
+  const target = isWorkBuddy
+    ? (record.workbuddy ?? (record.workbuddy = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
+    : (record.channels[provider] ?? (record.channels[provider] = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
+  target.input += buckets.input
+  target.output += buckets.output
+  target.cacheRead += buckets.cacheRead
+  target.calls += 1
+  try {
+    writeJson(file, record)
+  } catch {
+    // 写盘失败不该打断模型流：这一笔丢失，下一轮照常记。
+  }
+}
+
+/**
+ * 自带账本的今日读数。
+ *
+ * 与 {@link readOfmTokenUsage} 返回同一形状，前端不必区分数据来自哪里。
+ * 今天的文件还没有（今天第一次调用尚未发生）时返回 day:null。
+ */
+function readLocalTokenUsage() {
+  const date = todayKey()
+  const state = readJson(tokensFile(date), null)
+  if (state === null || state.date !== date || typeof state.channels !== 'object' || state.channels === null) {
+    return { available: true, day: null, channels: [], total: null, source: 'local' }
+  }
+  const channels = []
+  const total = { input: 0, output: 0, cacheRead: 0, calls: 0 }
+  for (const [channel, row] of Object.entries(state.channels)) {
+    if (row === null || typeof row !== 'object') continue
+    const bucket = {
+      channel,
+      input: Number(row.input) || 0,
+      output: Number(row.output) || 0,
+      cacheRead: Number(row.cacheRead) || 0,
+      calls: Number(row.calls) || 0,
+    }
+    if (bucket.calls === 0) continue
+    channels.push(bucket)
+    total.input += bucket.input
+    total.output += bucket.output
+    total.cacheRead += bucket.cacheRead
+    total.calls += bucket.calls
+  }
+  return { available: true, day: date, channels, total, source: 'local', workbuddy: localWorkBuddyTotal(state) }
+}
+
+/** 本地账本里 WorkBuddy 的今日合计；没有记录时全 0（区别于 null：那代表没有数据源）。 */
+function localWorkBuddyTotal(state) {
+  const row = state?.workbuddy
+  if (row === null || typeof row !== 'object') return { input: 0, output: 0, cacheRead: 0, calls: 0 }
+  return {
+    input: Number(row.input) || 0,
+    output: Number(row.output) || 0,
+    cacheRead: Number(row.cacheRead) || 0,
+    calls: Number(row.calls) || 0,
+  }
+}
+
+/**
+ * 把本插件自己采集的日账本并进 `days`（同一天以本地为准）。
+ *
+ * cost-meter 停用后它那边的账本不再增长，主界面「今日 token」与统计页就只能
+ * 靠这份本地账。同一天两边都有时用本地的：它是实时采集的，覆盖的是同一个
+ * 口径，取本地不会把两个来源相加。
+ */
+function mergeLocalDays(days) {
+  let names = []
+  try { names = readdirSync(ledgerDir()) } catch { return }
+  for (const name of names) {
+    if (!name.startsWith('ofm-tokens-') || !name.endsWith('.json')) continue
+    const state = readJson(path.join(ledgerDir(), name), null)
+    const date = typeof state?.date === 'string' ? state.date : ''
+    if (date === '' || typeof state?.channels !== 'object' || state.channels === null) continue
+    const ofm = emptyUsage()
+    const workbuddy = emptyUsage()
+    const byChannel = {}
+    for (const [channel, row] of Object.entries(state.channels)) {
+      if (row === null || typeof row !== 'object') continue
+      addUsage(ofm, row)
+      byChannel[channel] = emptyUsage()
+      addUsage(byChannel[channel], row)
+    }
+    const wb = state.workbuddy
+    if (wb !== null && typeof wb === 'object') addUsage(workbuddy, wb)
+    const existing = days.find(row => row.date === date)
+    if (existing === undefined) days.push({ date, ofm, workbuddy, byChannel })
+    else { existing.ofm = ofm; existing.workbuddy = workbuddy; existing.byChannel = byChannel }
+  }
+}
+
 /** 缓存：文件指纹没变就不重新解析。 */
 let usageCache = { key: '', value: null }
 
@@ -425,6 +587,7 @@ function readUsageStats() {
     }
     days.push({ date, ofm, workbuddy, byChannel })
   }
+  mergeLocalDays(days)
   days.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
 
   const value = { available: true, ledger: file, days }
@@ -592,6 +755,17 @@ const CODEX_WINDOWS = [
   { key: 604_800, label: 'weekly' },
 ]
 
+/**
+ * 快照多久没更新就算过期。
+ *
+ * 订阅插件跑起来时每 5～60 秒写一次样本（见它的 quotaRefreshMs：用得越多写得越勤），
+ * 所以十几分钟没有新样本只可能是一种情况——它这一阵没在采样，通常就是 DSH 关着。
+ * 这段时间里 5 小时窗多半已经翻过了重置点，快照上的百分比是上一轮的残留，
+ * 拿它当「现在还剩多少」会明显偏高。超过这个时长就标 stale，界面改为占位，
+ * 等它把新样本写进来再显示。
+ */
+const CODEX_STALE_MS = 15 * 60 * 1000
+
 function readCodexQuota() {
   let state
   try {
@@ -627,7 +801,11 @@ function readCodexQuota() {
   const codexWindows = windows.filter(row => row.limitId === 'codex')
   const latest = codexWindows.reduce((acc, row) => row.sampledAt !== null && (acc === null || row.sampledAt > acc) ? row.sampledAt : acc, null)
   const picked = latest === null ? [] : codexWindows.filter(row => row.sampledAt === latest)
-  return { available: picked.length > 0, windows: picked }
+  if (picked.length === 0) return { available: false, windows: [], sampledAt: null, ageMs: null, stale: false }
+  // 陈旧判定放在 Host 侧：浏览器算不出「样本是不是早就该翻篇了」，
+  // 它只看得到一个百分比。开机那一刻快照还停在上次关机的读数，这里必须先拦下。
+  const ageMs = Math.max(0, Date.now() - latest)
+  return { available: true, windows: picked, sampledAt: latest, ageMs, stale: ageMs > CODEX_STALE_MS }
 }
 
 // ── OFM 模型今日 token（cost-meter）────────────────────────────────────────
@@ -645,9 +823,16 @@ function readOfmTokenUsage() {
   } catch {
     return { available: false, day: null, channels: [], total: null }
   }
-  const days = Object.entries(ledger?.days ?? {}).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-  if (days.length === 0) return { available: true, day: null, channels: [], total: null }
-  const [date, day] = days[days.length - 1]
+  // 必须按「今天」精确取，不能取账本里最后一天。
+  //
+  // 跨天之后今天第一次调用可能还没发生，账本尚未写入——此时最后一条是昨天的，
+  // 取它会让面板整个白天都挂着一个不会变的旧数，看起来就像「累计没清空」。
+  // 找不今天的记录就如实报 day:null，界面显示占位。
+  const date = todayKey()
+  const day = ledger?.days?.[date]
+  // 今天还没有记录（今天第一次调用尚未发生，或账本尚未落盘）：如实报空，
+  // 让界面显示占位，而不是把昨天的数顶上去。
+  if (day === null || typeof day !== 'object') return { available: true, day: null, channels: [], total: null }
   // 账本键是 `provider:model`。OFM 十个账号渠道各自是独立前缀（与 OFM_PROVIDERS
   // 一致），免费车道则是 `our-free-model`。模型名里可能还有冒号，只切第一段。
   const ofmSet = new Set(OFM_PROVIDERS)
@@ -760,7 +945,11 @@ async function handleApi(req, res) {
     // OFM 免费模型的今日 token：读 cost-meter 账本。
     if (route === '/ofm-tokens') {
       if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
-      return sendJson(res, 200, readOfmTokenUsage())
+      // 本地账本优先：它由本插件自己挂 llm/stream 采集，不依赖 cost-meter。
+      // 本地还没有今天的数据时才回落到 cost-meter 的账本（老用户第一次升级时
+      // 今天早些时候的用量还在那边，直接丢掉会让当日数字凭空归零）。
+      const local = readLocalTokenUsage()
+      return sendJson(res, 200, local.day === null ? readOfmTokenUsage() : local)
     }
     if (route === '/ping') return sendJson(res, 200, { ok: true })
     return sendJson(res, 404, { error: 'not found' })
@@ -785,6 +974,33 @@ export function apply(ctx) {
   }
   const dispose = ctx.webServer.register({ kind: 'prefix', path: API_PREFIX, handler: handleApi })
   ctx.effect(() => dispose, 'ofm-credit-watch: 当日累计账本')
+
+  // 用量采集：挂在宿主的 llm/stream 瀑布上，每次模型调用结束取一次 usage。
+  //
+  // global: true 让子会话、后台任务与其它 llm 服务作用域里的调用也走这里——
+  // 面板要的是「今天 OFM 花了多少」，漏掉子代理会把数字算小。
+  // 只透传 next()，不改变流协议，也不吞下游的异常。
+  if (typeof ctx.on === 'function') {
+    const disposeStream = ctx.on('llm/stream', (options, next) => {
+      const startedAtMs = Date.now()
+      const provider = options?.provider
+      const model = options?.model
+      const sessionId = options?.sessionId
+      const downstream = next()
+      return (async function* ofmTokenWatchStream() {
+        let usage = null
+        for await (const chunk of downstream) {
+          if (chunk !== null && chunk !== undefined && chunk.type === 'usage' && chunk.usage != null) usage = chunk.usage
+          yield chunk
+        }
+        if (usage !== null) {
+          try { recordTokenUsage(provider, model, sessionId, usage, startedAtMs) } catch { /* 记账失败不影响已跑完的流 */ }
+        }
+      })()
+    }, { global: true })
+    // ctx.on 的返回值由 Cordis 按插件作用域自动回收，不必再包一层 effect：
+    // 多包一层会在卸载时把同一个 disposer 调用两次。
+  }
   ctx.logger?.info?.(`ofm-credit-watch: 当日累计账本挂载在 ${API_PREFIX}`)
 }
 
@@ -795,4 +1011,5 @@ export const __test = {
   readUsageStats, usageLedgerFile, OFM_PROVIDERS, WORKBUDDY_PROVIDERS, usageCache,
   fetchBeichen, readBeichen, readBeichenKey, beichenFile,
   readCodexQuota, readOfmTokenUsage,
+  recordTokenUsage, readLocalTokenUsage, tokensFile, bucketsOf,
 }

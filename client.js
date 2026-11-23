@@ -274,6 +274,8 @@ window.__ModuleLoader__.load({
         codexWhenDate: '{month}月{day}日 {time}',
         codexChipFiveHour: '5h',
         codexChipWeekly: '1w',
+        codexStale: '快照已过期，等订阅插件刷新',
+        codexTipStale: '　快照停在上次采样，等订阅插件刷新后再看',
         ofmName: 'OFM 模型',
         ofmTokensEmpty: '今天还没有调用',
         ofmCalls: '{count} 次调用',
@@ -376,6 +378,8 @@ window.__ModuleLoader__.load({
         codexWhenDate: '{month} {day}, {time}',
         codexChipFiveHour: '5h',
         codexChipWeekly: '1w',
+        codexStale: 'snapshot expired, waiting for refresh',
+        codexTipStale: '  snapshot is from the last sample, waiting for the subscription plugin',
         ofmName: 'OFM models',
         ofmTokensEmpty: 'No calls today',
         ofmCalls: '{count} calls',
@@ -2484,9 +2488,13 @@ window.__ModuleLoader__.load({
       // ── GPT 订阅分区 ────────────────────────────────────────────────────
       // 数据源是订阅插件落盘的预测快照（Host 侧读文件）：5 小时窗与周窗的
       // 剩余百分比。折叠栏给「5小时 63% · 本周 94%」，展开加重置时间。
-      const codexFiveHour = Array.isArray(codex?.windows)
+      // 快照过期：样本还停在上次采样那一刻。DSH 关了一夜之后，5 小时窗早就
+      // 翻过重置点，快照上那个百分比是上一轮的残留，直接显示会明显偏高。
+      // 这种时候按缺失处理，界面给占位，等订阅插件写进新样本再显示。
+      const codexStale = codex?.stale === true
+      const codexFiveHour = !codexStale && Array.isArray(codex?.windows)
         ? codex.windows.find(row => row.kind === 'fiveHour') ?? null : null
-      const codexWeekly = Array.isArray(codex?.windows)
+      const codexWeekly = !codexStale && Array.isArray(codex?.windows)
         ? codex.windows.find(row => row.kind === 'weekly') ?? null : null
       const resetWhen = row => {
         if (row === null || !Number.isFinite(row.resetsAt)) return ''
@@ -2539,6 +2547,8 @@ window.__ModuleLoader__.load({
         }
         addRow(codexFiveHour, t('codexFiveHour'))
         addRow(codexWeekly, t('codexWeekly'))
+        // 过期时两个窗口都被按缺失处理，这里补一行说明，别让提示看起来像没装插件。
+        if (codexStale) line.push(t('codexTipStale'))
         // 快照里两个窗口都没有时不给空提示，否则标题栏连展开说明也一起没了。
         if (line.length === 0) return codexOpen ? t('codexTipCollapse') : t('codexTipExpand')
         const sampled = codexFiveHour?.sampledAt ?? codexWeekly?.sampledAt
@@ -2555,7 +2565,8 @@ window.__ModuleLoader__.load({
             return next
           })
         }
-        const summary = codexFiveHour === null && codexWeekly === null ? t('codexUnavailable')
+        const summary = codexStale ? t('codexStale')
+          : codexFiveHour === null && codexWeekly === null ? t('codexUnavailable')
           : [codexFiveHour, codexWeekly].map((row, index) =>
             row === null ? null : `${index === 0 ? t('codexFiveHour') : t('codexWeekly')} ${pct(row)}`).filter(Boolean).join(' · ')
         return h('div', { style: { ...style.wbWrap, ...style.sectionWrap }, className: 'ofm-section', 'data-ofm-credit-watch-codex': 'section' },

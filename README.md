@@ -38,7 +38,7 @@
   数据行悬停时淡蓝高亮，分区之间有分隔线；配色全部走 `--dsw-alias-*` 主题变量，
   明暗主题自动跟随
 - **OFM 模型今日 token**：独立分区，列出 OFM 十个账号渠道与免费车道当天的
-  token 用量（数据取自 cost-meter 账本），头部给合计
+  token 用量（本插件自己挂 llm/stream 采集），头部给合计
 - **大栏隐藏**：设置面板可勾选隐藏北辰 / GPT 订阅 / OFM 模型 / WorkBuddy
   四个大栏
 - **token 统计界面**：标题栏的统计按钮把整张卡片切换到统计页，按日期查看每日 token 用量
@@ -88,10 +88,10 @@
 | POST | `/api/ofm-credit-watch/ledger` | 报一轮读数 `{ readings: [{provider, total}] }`，返回累加后的今日累计 |
 | GET | `/api/ofm-credit-watch/wb` | 读 WorkBuddy 账本（今日 + 累计 + 基准时间） |
 | POST | `/api/ofm-credit-watch/wb` | 报一轮读数 `{ readings: [{key, total}] }`，返回累加后的今日与累计 |
-| GET | `/api/ofm-credit-watch/usage` | 按天汇总的 token 用量（数据取自 cost-meter 账本） |
+| GET | `/api/ofm-credit-watch/usage` | 按天汇总的 token 用量（统计页与 WorkBuddy 今日合计；本地采集账本与 cost-meter 账本按日合并，同日以本地为准） |
 | GET | `/api/ofm-credit-watch/beichen` | 北辰 API 的余额与按日用量（Host 侧用 API Key 取数并逐日留存） |
 | GET | `/api/ofm-credit-watch/codex` | GPT 订阅的 5 小时/周限额（读订阅插件的预测快照） |
-| GET | `/api/ofm-credit-watch/ofm-tokens` | OFM 各渠道今日 token 用量（读 cost-meter 账本） |
+| GET | `/api/ofm-credit-watch/ofm-tokens` | OFM 各渠道今日 token 用量（读本插件自己的采集账本） |
 | GET | `/api/ofm-credit-watch/ping` | 健康检查 |
 
 **为什么差值必须由 Host 算**：同时开两个窗口时，让浏览器各自算差值会把同一笔消耗
@@ -134,7 +134,8 @@
 
 ### token 用量统计
 
-数据取自 cost-meter 的日聚合账本 `$DSH_HOME/storages/cost-meter/ledger.json`——它是唯一一份
+数据由本插件自己挂在宿主 `llm/stream` 瀑布上采集，落在 `$DSH_HOME/ofm-credit-watch/ofm-tokens-YYYY-MM-DD.json`。
+本插件自带的账本只是其一；没有它时仍可回落到 cost-meter 的日聚合账本 `$DSH_HOME/storages/cost-meter/ledger.json`，那是另一份
 现成的「按天 × provider × model」记录，插件的每笔调用都落在那里。在这份账本上再算一遍既能
 避免与会话日志的口径漂移，也不必去解析 zstd 多帧的会话文件。
 
