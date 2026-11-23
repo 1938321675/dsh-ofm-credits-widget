@@ -61,7 +61,10 @@ async function main() {
   check('注册了一条路由', webServer.routes.length, 1)
   check('路由是前缀匹配', webServer.routes[0].kind, 'prefix')
   check('路由前缀正确', webServer.routes[0].path, '/api/ofm-credit-watch')
-  check('注册了 effect 用于卸载', disposers.length, 1)
+  // effect 的数量不该写死：插件每多一处需要在卸载时清理的资源（路由、定时器）
+  // 就多一个 effect。这里要验的是「注册了、并且每个都能安全调用」。
+  checkTrue('注册了 effect 用于卸载', disposers.length >= 1)
+  checkTrue('每个 effect 都返回可调用的清理函数', disposers.every(fn => typeof fn === 'function'))
 
   // 真 HTTP 服务：把 /api/ofm-credit-watch/* 交给路由处理。
   const route = webServer.routes[0]

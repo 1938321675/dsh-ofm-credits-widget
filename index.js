@@ -32,6 +32,7 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
+import { zstdDecompressSync } from 'node:zlib'
 
 /** 插件标识，与 package.json 的 name 一致。 */
 export const name = 'ofm-credit-watch'
@@ -363,6 +364,15 @@ const OFM_PROVIDERS = [
 /** WorkBuddy 两个区域的前缀；面板把它们合成一个总数。 */
 const WORKBUDDY_PROVIDERS = ['workbuddy', 'workbuddy-global']
 
+/**
+ * GPT 订阅（ChatGPT 账号）的 provider id。
+ *
+ * 订阅插件只回「还剩多少百分比」，不带 token 用量；用量得自己从 llm/stream
+ * 的 usage 块里采。订阅线路的额度按百分比计，token 用量是另一件事，两者
+ * 一起看才知道「这点余量是被多少 token 吃掉的」。
+ */
+const CODEX_PROVIDERS = ['openai-codex']
+
 // ── 自带用量账本（不依赖 cost-meter）────────────────────────────────────────
 /**
  * 自己记一份 OFM 渠道的 token 用量。
@@ -423,7 +433,8 @@ function recordTokenUsage(provider, model, sessionId, usage, atMs) {
   if (typeof provider !== 'string' || provider === '') return
   const isOfm = OFM_PROVIDERS.includes(provider) || provider === 'our-free-model'
   const isWorkBuddy = WORKBUDDY_PROVIDERS.includes(provider)
-  if (!isOfm && !isWorkBuddy) return
+  const isCodex = CODEX_PROVIDERS.includes(provider)
+  if (!isOfm && !isWorkBuddy && !isCodex) return
   const buckets = bucketsOf(usage)
   if (buckets.input === 0 && buckets.output === 0 && buckets.cacheRead === 0) return
   if (!dedupToken(sessionId, provider, model, buckets, atMs)) return
@@ -433,10 +444,12 @@ function recordTokenUsage(provider, model, sessionId, usage, atMs) {
   const state = readJson(file, null)
   const record = state && state.date === date && typeof state.channels === 'object' && state.channels !== null
     ? state : { date, channels: {}, workbuddy: { input: 0, output: 0, cacheRead: 0, calls: 0 } }
-  // OFM 渠道逐渠道记；WorkBuddy 两个区域按一个合计桶记，主界面就显示这个合计。
+  // OFM 渠道逐渠道记；WorkBuddy 与 GPT 订阅各按一个合计桶记。
   const target = isWorkBuddy
     ? (record.workbuddy ?? (record.workbuddy = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
-    : (record.channels[provider] ?? (record.channels[provider] = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
+    : isCodex
+      ? (record.codex ?? (record.codex = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
+      : (record.channels[provider] ?? (record.channels[provider] = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
   target.input += buckets.input
   target.output += buckets.output
   target.cacheRead += buckets.cacheRead
@@ -478,18 +491,154 @@ function readLocalTokenUsage() {
     total.cacheRead += bucket.cacheRead
     total.calls += bucket.calls
   }
-  return { available: true, day: date, channels, total, source: 'local', workbuddy: localWorkBuddyTotal(state) }
+  return {
+    available: true, day: date, channels, total, source: 'local',
+    workbuddy: localBucketTotal(state, 'workbuddy'),
+    codex: localBucketTotal(state, 'codex'),
+  }
 }
 
-/** 本地账本里 WorkBuddy 的今日合计；没有记录时全 0（区别于 null：那代表没有数据源）。 */
-function localWorkBuddyTotal(state) {
-  const row = state?.workbuddy
+/**
+ * 本地账本里某个合计桶的今日用量（workbuddy / codex）。
+ *
+ * 没有记录时返回全 0 而不是 null：0 表示「今天这个渠道确实还没用过」，
+ * null 留给「连数据源都没有」，前端据此决定显示 0 还是占位。
+ */
+function localBucketTotal(state, key) {
+  const row = state?.[key]
   if (row === null || typeof row !== 'object') return { input: 0, output: 0, cacheRead: 0, calls: 0 }
   return {
     input: Number(row.input) || 0,
     output: Number(row.output) || 0,
     cacheRead: Number(row.cacheRead) || 0,
     calls: Number(row.calls) || 0,
+  }
+}
+
+// ── 启动回填：补齐「采集器还没挂上时」漏掉的 GPT 订阅用量 ─────────────────
+/**
+ * 会话日志是一份可回溯的用量记录：每条 `assistant/message` 都带 usage 块。
+ *
+ * 采集器只能在插件挂载之后记数，重启前那段（尤其是今天早些时候）就漏了。
+ * 订阅分区只显示「今日 token」，漏一段会让数字明显偏小，所以启动时从今天的
+ * 会话日志补一遍。只补 codex：OFM 与 WorkBuddy 那边同样会漏，但本插件已经
+ * 在跑一整天，重启造成的缺口远小于 codex 这条今天才接入的线路。
+ *
+ * 日志是多帧 zstd 拼接，`zstdDecompressSync` 对整份文件只解第一帧（只有头行），
+ * 必须按帧魔数切开逐帧解压；明文日志则直接读。
+ */
+const SESSION_LOG = /^session(?:\.v([1-9]\d*))?\.jsonl(\.zstd)?$/
+
+function decompressSessionLog(file) {
+  const buf = readFileSync(file)
+  if (!file.endsWith('.zstd')) {
+    return buf.toString('utf8')
+  }
+  const magic = [0x28, 0xb5, 0x2f, 0xfd]
+  const offsets = []
+  for (let i = 0; i + 3 < buf.length; i += 1) {
+    if (buf[i] === magic[0] && buf[i + 1] === magic[1] && buf[i + 2] === magic[2] && buf[i + 3] === magic[3]) offsets.push(i)
+  }
+  const parts = []
+  for (let k = 0; k < offsets.length; k += 1) {
+    const start = offsets[k]
+    const end = k + 1 < offsets.length ? offsets[k + 1] : buf.length
+    try { parts.push(zstdDecompressSync(buf.subarray(start, end))) } catch { /* 半截帧跳过 */ }
+  }
+  return Buffer.concat(parts).toString('utf8')
+}
+
+/** 列出每个会话目录的当前代日志文件。 */
+function listSessionLogs(root) {
+  const files = []
+  let projects = []
+  try { projects = readdirSync(root) } catch { return files }
+  for (const project of projects) {
+    let sessions = []
+    try { sessions = readdirSync(path.join(root, project)) } catch { continue }
+    for (const session of sessions) {
+      const dir = path.join(root, project, session)
+      let names = []
+      try { names = readdirSync(dir) } catch { continue }
+      const candidates = names
+        .map(name => {
+          const matched = SESSION_LOG.exec(name)
+          return matched === null ? null : { name, version: Number(matched[1] ?? 0), compressed: Boolean(matched[2]) }
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.version - a.version || Number(b.compressed) - Number(a.compressed))
+      if (candidates.length > 0) files.push(path.join(dir, candidates[0].name))
+    }
+  }
+  return files
+}
+
+/**
+ * 从今天的会话日志补齐漏采的用量。
+ *
+ * 与实时采集共用同一个账本和同一个合计桶，因此这里**只补差额**：账本里已有的
+ * 部分不重复累加。做法是拿日志重建出的总量与账本当前值取较大者——日志是完整
+ * 记录、账本是增量累计，正常情况下日志的量大；万一日志被清理过，保留账本值。
+ */
+function backfillTodayFromSessionLogs(sessionsRoot) {
+  const date = todayKey()
+  const dayStart = Date.parse(`${date}T00:00:00+08:00`)
+  if (!Number.isFinite(dayStart)) return { updated: false, reason: 'no-day' }
+  const rebuilt = {}
+  let scanned = 0
+  for (const file of listSessionLogs(sessionsRoot)) {
+    let info
+    try { info = statSync(file) } catch { continue }
+    if (info.mtimeMs < dayStart) continue
+    scanned += 1
+    let text
+    try { text = decompressSessionLog(file) } catch { continue }
+    for (const line of text.split('\n')) {
+      if (line === '') continue
+      let row
+      try { row = JSON.parse(line) } catch { continue }
+      const usage = row?.data?.usage
+      if (usage === null || usage === undefined) continue
+      const provider = row?.data?.message?.source?.provider ?? row?.data?.provider
+      if (typeof provider !== 'string') continue
+      const isCodex = CODEX_PROVIDERS.includes(provider)
+      const isWorkBuddy = WORKBUDDY_PROVIDERS.includes(provider)
+      const isOfm = OFM_PROVIDERS.includes(provider) || provider === 'our-free-model'
+      if (!isCodex && !isWorkBuddy && !isOfm) continue
+      const time = Number(row?.time)
+      if (!Number.isFinite(time) || time < dayStart) continue
+      const key = isCodex ? 'codex' : isWorkBuddy ? 'workbuddy' : provider
+      const bucket = rebuilt[key] ?? (rebuilt[key] = { input: 0, output: 0, cacheRead: 0, calls: 0 })
+      const parsed = bucketsOf(usage)
+      bucket.input += parsed.input
+      bucket.output += parsed.output
+      bucket.cacheRead += parsed.cacheRead
+      bucket.calls += 1
+    }
+  }
+  if (scanned === 0) return { updated: false, reason: 'no-logs' }
+
+  const file = tokensFile(date)
+  const state = readJson(file, null)
+  const record = state && state.date === date && typeof state.channels === 'object' && state.channels !== null
+    ? state : { date, channels: {}, workbuddy: { input: 0, output: 0, cacheRead: 0, calls: 0 } }
+  let changed = false
+  for (const [key, bucket] of Object.entries(rebuilt)) {
+    const target = key === 'codex' || key === 'workbuddy'
+      ? (record[key] ?? (record[key] = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
+      : (record.channels[key] ?? (record.channels[key] = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
+    // 只升不降：日志重建值更大说明有漏采，补上；更小说明日志不全，保留账本。
+    if (bucket.input > target.input) { target.input = bucket.input; changed = true }
+    if (bucket.output > target.output) { target.output = bucket.output; changed = true }
+    if (bucket.cacheRead > target.cacheRead) { target.cacheRead = bucket.cacheRead; changed = true }
+    if (bucket.calls > target.calls) { target.calls = bucket.calls; changed = true }
+  }
+  if (!changed) return { updated: false, reason: 'up-to-date' }
+  try {
+    writeJson(file, record)
+    return { updated: true, keys: Object.keys(rebuilt) }
+  } catch {
+    return { updated: false, reason: 'write-failed' }
   }
 }
 
@@ -519,9 +668,13 @@ function mergeLocalDays(days) {
     }
     const wb = state.workbuddy
     if (wb !== null && typeof wb === 'object') addUsage(workbuddy, wb)
+    // GPT 订阅：独立一桶，统计页与订阅分区都用它。
+    const codex = emptyUsage()
+    const cx = state.codex
+    if (cx !== null && typeof cx === 'object') addUsage(codex, cx)
     const existing = days.find(row => row.date === date)
-    if (existing === undefined) days.push({ date, ofm, workbuddy, byChannel })
-    else { existing.ofm = ofm; existing.workbuddy = workbuddy; existing.byChannel = byChannel }
+    if (existing === undefined) days.push({ date, ofm, workbuddy, byChannel, codex })
+    else { existing.ofm = ofm; existing.workbuddy = workbuddy; existing.byChannel = byChannel; existing.codex = codex }
   }
 }
 
@@ -837,11 +990,17 @@ function readCodexQuota() {
   const codexWindows = windows.filter(row => row.limitId === 'codex')
   const latest = codexWindows.reduce((acc, row) => row.sampledAt !== null && (acc === null || row.sampledAt > acc) ? row.sampledAt : acc, null)
   const picked = latest === null ? [] : codexWindows.filter(row => row.sampledAt === latest)
-  if (picked.length === 0) return { available: false, windows: [], sampledAt: null, ageMs: null, stale: false }
+  // 今日 token 跟限额一起回：订阅线路的额度是按百分比算的，光看「还剩 48%」
+  // 不知道是被多少 token 吃掉的。这份数据来自本插件自己的采集账本。
+  const tokens = readLocalTokenUsage()
+  const todayTokens = tokens.codex ?? null
+  if (picked.length === 0) {
+    return { available: false, windows: [], sampledAt: null, ageMs: null, stale: false, tokens: todayTokens }
+  }
   // 陈旧判定放在 Host 侧：浏览器算不出「样本是不是早就该翻篇了」，
   // 它只看得到一个百分比。开机那一刻快照还停在上次关机的读数，这里必须先拦下。
   const ageMs = Math.max(0, Date.now() - latest)
-  return { available: true, windows: picked, sampledAt: latest, ageMs, stale: ageMs > CODEX_STALE_MS }
+  return { available: true, windows: picked, sampledAt: latest, ageMs, stale: ageMs > CODEX_STALE_MS, tokens: todayTokens }
 }
 
 // ── OFM 模型今日 token（cost-meter）────────────────────────────────────────
@@ -1037,6 +1196,20 @@ export function apply(ctx) {
     // ctx.on 的返回值由 Cordis 按插件作用域自动回收，不必再包一层 effect：
     // 多包一层会在卸载时把同一个 disposer 调用两次。
   }
+  // 启动回填：采集器只能记挂载之后的调用，今天早些时候（或上一次运行）的用量
+  // 会漏。放到定时器里异步跑——它要解开几十 MB 的会话日志，放在 apply 里会把
+  // 启动拖住近十秒。失败只是少补一段数，不影响实时采集。
+  const backfillTimer = setTimeout(() => {
+    try {
+      const result = backfillTodayFromSessionLogs(path.join(DSH_HOME, 'sessions'))
+      if (result.updated) ctx.logger?.info?.(`ofm-credit-watch: 启动回填已补齐 ${result.keys.join(', ')}`)
+    } catch (error) {
+      ctx.logger?.debug?.(`ofm-credit-watch: 启动回填跳过 (${String(error?.message ?? error)})`)
+    }
+  }, 3000)
+  backfillTimer.unref?.()
+  ctx.effect(() => () => clearTimeout(backfillTimer), 'ofm-credit-watch: 启动回填')
+
   ctx.logger?.info?.(`ofm-credit-watch: 当日累计账本挂载在 ${API_PREFIX}`)
 }
 
@@ -1048,4 +1221,5 @@ export const __test = {
   fetchBeichen, readBeichen, readBeichenKey, beichenFile,
   readCodexQuota, readOfmTokenUsage,
   recordTokenUsage, readLocalTokenUsage, tokensFile, bucketsOf,
+  backfillTodayFromSessionLogs, listSessionLogs, decompressSessionLog, CODEX_PROVIDERS,
 }

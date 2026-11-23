@@ -276,6 +276,9 @@ window.__ModuleLoader__.load({
         codexChipWeekly: '1w',
         codexStale: '快照已过期，等订阅插件刷新',
         codexTipStale: '　快照停在上次采样，等订阅插件刷新后再看',
+        codexTokensToday: '今日 token',
+        codexTokensBreakdown: '输入 {input} · 输出 {output} · 缓存 {cache}',
+        codexTipTokens: '　今日 {total} token（入 {input} / 出 {output} / 缓存 {cache}）',
         ofmName: 'OFM 模型',
         ofmTokensEmpty: '今天还没有调用',
         ofmCalls: '{count} 次调用',
@@ -380,6 +383,9 @@ window.__ModuleLoader__.load({
         codexChipWeekly: '1w',
         codexStale: 'snapshot expired, waiting for refresh',
         codexTipStale: '  snapshot is from the last sample, waiting for the subscription plugin',
+        codexTokensToday: 'Tokens today',
+        codexTokensBreakdown: 'in {input} · out {output} · cache {cache}',
+        codexTipTokens: '  {total} tokens today (in {input} / out {output} / cache {cache})',
         ofmName: 'OFM models',
         ofmTokensEmpty: 'No calls today',
         ofmCalls: '{count} calls',
@@ -2502,6 +2508,11 @@ window.__ModuleLoader__.load({
         if (ms <= 0) return t('codexResetSoon')
         return fill(t('codexResets'), { when: span(ms, lang) })
       }
+      // 今日 token：订阅线路的额度按百分比算，配一个「这点余量被多少 token 吃掉」
+      // 才说得清消耗速度。数据由 Host 侧的 llm/stream 采集器统计。
+      const codexTokens = codex?.tokens ?? null
+      const codexTokenTotal = codexTokens === null ? null
+        : (codexTokens.input || 0) + (codexTokens.output || 0) + (codexTokens.cacheRead || 0)
       const pct = row => row === null ? '—' : `${Math.round(row.remainingPercent)}%`
       /**
        * 悬浮提示里的绝对时刻。
@@ -2547,6 +2558,15 @@ window.__ModuleLoader__.load({
         }
         addRow(codexFiveHour, t('codexFiveHour'))
         addRow(codexWeekly, t('codexWeekly'))
+        // 今日 token：光有百分比看不出消耗速度，这一行给出被吃掉多少 token。
+        if (codexTokenTotal !== null && codexTokenTotal > 0) {
+          line.push(fill(t('codexTipTokens'), {
+            total: formatTokens(codexTokenTotal),
+            input: formatTokens(codexTokens.input),
+            output: formatTokens(codexTokens.output),
+            cache: formatTokens(codexTokens.cacheRead),
+          }))
+        }
         // 过期时两个窗口都被按缺失处理，这里补一行说明，别让提示看起来像没装插件。
         if (codexStale) line.push(t('codexTipStale'))
         // 快照里两个窗口都没有时不给空提示，否则标题栏连展开说明也一起没了。
@@ -2586,8 +2606,31 @@ window.__ModuleLoader__.load({
                 'data-codex-chips': 'title',
               },
                 codexFiveHour === null ? null : chipOf(t('codexChipFiveHour'), codexFiveHour.remainingPercent),
-                codexWeekly === null ? null : chipOf(t('codexChipWeekly'), codexWeekly.remainingPercent)),
+                codexWeekly === null ? null : chipOf(t('codexChipWeekly'), codexWeekly.remainingPercent),
+                // 今日 token 跟在胶囊后面：两个百分比说明还剩多少，这个数说明用掉多少。
+                codexTokenTotal === null || codexTokenTotal <= 0
+                  ? null
+                  : h('span', {
+                    style: { ...style.wbSum, marginLeft: 2, fontSize: 10 },
+                    'data-codex-tokens': 'title',
+                  }, `${formatTokens(codexTokenTotal)}`)),
             caretOf(codexOpen)),
+          // 今日 token 明细：一行独立于两个窗口，因为它跨越整条订阅线路。
+          !codexOpen || codexTokenTotal === null || codexTokenTotal <= 0 ? null : h('div', {
+            style: { ...style.wbRow, paddingLeft: 18 },
+            className: 'ofm-row',
+            'data-codex-row': 'tokens',
+          },
+            h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
+            h('span', { style: style.wbNameCell },
+              h('span', { style: style.wbName }, t('codexTokensToday')),
+              h('span', { style: style.meta }, fill(t('codexTokensBreakdown'), {
+                input: formatTokens(codexTokens.input),
+                output: formatTokens(codexTokens.output),
+                cache: formatTokens(codexTokens.cacheRead),
+              }))),
+            h('span', { style: { display: 'flex', alignItems: 'center' } }),
+            h('span', { style: style.wbAmount }, formatTokens(codexTokenTotal))),
           !codexOpen ? null : [codexFiveHour, codexWeekly].map((row, index) => row === null ? null : h('div', {
             key: index,
             // 明细行比标题栏多缩进 8px：层级上它是「GPT 订阅」的下级。
