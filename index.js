@@ -548,23 +548,59 @@ function emptyUsage() {
  * 账本缺失或读不出来时 `available: false`——面板据此显示「未连接 cost-meter」，
  * 而不是把 0 当成"今天没花"。
  */
+/**
+ * 数据源指纹：cost-meter 账本 + 本地采集账本。
+ *
+ * 缓存键必须覆盖**所有**参与汇总的文件。只算 cost-meter 那份是不够的：它停用
+ * 之后 mtime 永远不动，键就永远不变，缓存建好一次就再也不失效——本地采集的
+ * 新用量全被挡在缓存外面（面板上表现为积分在涨、token 一直不动）。
+ */
+function usageSourceKey() {
+  const parts = []
+  for (const file of [usageLedgerFile()]) {
+    try {
+      const st = statSync(file)
+      parts.push(`${st.mtimeMs}:${st.size}`)
+    } catch {
+      parts.push('missing')
+    }
+  }
+  let names = []
+  try { names = readdirSync(ledgerDir()) } catch { names = [] }
+  for (const name of names.filter(n => n.startsWith('ofm-tokens-') && n.endsWith('.json')).sort()) {
+    try {
+      const st = statSync(path.join(ledgerDir(), name))
+      parts.push(`${name}:${st.mtimeMs}:${st.size}`)
+    } catch {
+      parts.push(`${name}:missing`)
+    }
+  }
+  return parts.join('|')
+}
+
+/** 本地采集账本是否已有任何一天的记录。 */
+function hasLocalTokenLedger() {
+  try {
+    return readdirSync(ledgerDir()).some(name => name.startsWith('ofm-tokens-') && name.endsWith('.json'))
+  } catch {
+    return false
+  }
+}
+
 function readUsageStats() {
   const file = usageLedgerFile()
-  let stat
-  try {
-    stat = statSync(file)
-  } catch {
-    return { available: false, ledger: file, days: [] }
-  }
-  const key = `${stat.mtimeMs}:${stat.size}`
+  const key = usageSourceKey()
   if (usageCache.key === key && usageCache.value !== null) return usageCache.value
 
-  let ledger
+  // cost-meter 账本缺失不再是「没有数据」：本地采集账本可以独立支撑这份汇总。
+  // 只有两个来源都没有时才算不可用——那时面板显示「没有数据源」才是实话。
+  let ledger = null
   try {
     ledger = JSON.parse(readFileSync(file, 'utf8'))
   } catch {
-    return { available: false, ledger: file, days: [] }
+    ledger = null
   }
+  if (ledger === null && !hasLocalTokenLedger()) return { available: false, ledger: file, days: [] }
 
   const ofmSet = new Set(OFM_PROVIDERS)
   const wbSet = new Set(WORKBUDDY_PROVIDERS)
