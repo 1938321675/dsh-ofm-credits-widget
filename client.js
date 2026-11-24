@@ -293,6 +293,11 @@ window.__ModuleLoader__.load({
         statsTotal: '合计',
         statsOfm: 'OFM 渠道',
         statsWb: 'WorkBuddy',
+        statsCodex: 'GPT 订阅',
+        statsBeichen: '北辰 API',
+        beichenModels: '按模型（累计）',
+        statsBuckets: '输入 {input} · 缓存命中 {cache} · 输出 {output}',
+        statsBreakdown: '入 {input} · 缓 {cache} · 出 {output}',
         statsCalls: '{count} 次调用',
         statsPrev: '前一天',
         statsNext: '后一天',
@@ -400,6 +405,11 @@ window.__ModuleLoader__.load({
         statsTotal: 'total',
         statsOfm: 'OFM channels',
         statsWb: 'WorkBuddy',
+        statsCodex: 'GPT subscription',
+        statsBeichen: 'Beichen API',
+        beichenModels: 'by model (total)',
+        statsBuckets: 'in {input} · cache hit {cache} · out {output}',
+        statsBreakdown: 'in {input} · cache {cache} · out {output}',
         statsCalls: '{count} calls',
         statsPrev: 'Previous day',
         statsNext: 'Next day',
@@ -2048,8 +2058,8 @@ window.__ModuleLoader__.load({
         },
         // 三个大数字并排：合计给得最大，它是这一页要回答的问题。
         statsTotals: {
-          display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr', gap: 6,
-          padding: '2px 10px 8px',
+          display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 5,
+          padding: '2px 10px 5px',
         },
         statsTotalCell: { minWidth: 0 },
         statsTotalLabel: {
@@ -2061,8 +2071,23 @@ window.__ModuleLoader__.load({
           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         },
         statsRow: {
-          display: 'grid', gridTemplateColumns: '3px 1fr 64px',
+          display: 'grid', gridTemplateColumns: '3px 1fr 72px',
           alignItems: 'center', gap: 8, padding: '4px 10px 4px 7px',
+        },
+        // 右列两行：上面是当天总量，下面是调用次数。左列那行小字给三桶构成。
+        statsNumbers: {
+          minWidth: 0, display: 'flex', flexDirection: 'column',
+          alignItems: 'flex-end', gap: 1,
+        },
+        statsCalls: {
+          fontSize: 9.5, color: 'var(--dsw-alias-label-secondary, #888)',
+          fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
+        },
+        // 三桶构成行：跨整宽一行小字，不额外占高度。
+        statsBuckets: {
+          padding: '0 10px 6px', fontSize: 10,
+          color: 'var(--dsw-alias-label-secondary, #888)',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         },
         statsNameCell: { minWidth: 0, display: 'flex', flexDirection: 'column' },
         statsName: { fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
@@ -2229,6 +2254,31 @@ window.__ModuleLoader__.load({
       // 北辰 API 的读数派生量：分区标题栏与统计页都要用。
       const beichenBalance = beichen !== null && Number.isFinite(beichen.balance) ? beichen.balance : null
       const beichenToday = beichen?.today ?? null
+      // 按模型明细是累计口径（接口不分日），与「今日」那两行分开摆。
+      const beichenModels = Array.isArray(beichen?.models) ? beichen.models : []
+
+      /**
+       * 一行「入 x · 缓 y · 出 z」。
+       *
+       * 只给总量看不出构成，而缓存命中通常占大头——把三桶拆开才说得清这些
+       * token 花在哪一项。统计页与 OFM 分区共用这一份写法。
+       */
+      const breakdownText = row => fill(t('statsBreakdown'), {
+        input: formatTokens(row?.input || 0),
+        cache: formatTokens(row?.cacheRead || 0),
+        output: formatTokens(row?.output || 0),
+      })
+      /** 若干用量行按三桶相加：统计页顶部那行「构成」用它。 */
+      const sumBuckets = (...rows) => {
+        const total = { input: 0, cacheRead: 0, output: 0 }
+        for (const row of rows) {
+          if (row === null || row === undefined) continue
+          total.input += row.input || 0
+          total.cacheRead += row.cacheRead || 0
+          total.output += row.output || 0
+        }
+        return total
+      }
 
       // ── 统计界面 ────────────────────────────────────────────────────────
       // 整张卡片切换成统计页：顶部日期条、当天合计、OFM 渠道逐行、WorkBuddy 合计。
@@ -2248,6 +2298,23 @@ window.__ModuleLoader__.load({
         const picked = days[pickedIndex]
         const ofmTotal = totalTokens(picked.ofm)
         const wbTotal = totalTokens(picked.workbuddy)
+        // GPT 订阅：与 OFM 渠道不是同一个口径（额度按百分比、用量按 token），
+        // 但它同样属于「这天用掉多少」，所以单独一行统计、单独一格合计。
+        const codexRow = picked.codex ?? null
+        const codexTotal = totalTokens(codexRow)
+        // 北辰：接口只回当天，历史由 Host 逐日攒在 beichen.days 里，跟同一个
+        // 日期条翻。它同样是「这天用掉多少」的一路，进合计与三桶构成。
+        const beichenDay = beichen === null || beichen.configured === false ? null
+          : usageOfDate(Array.isArray(beichen.days) ? beichen.days : [], picked.date)
+        const beichenBucket = beichenDay === null ? null : {
+          input: beichenDay.inputTokens || 0,
+          cacheRead: beichenDay.cacheReadTokens || 0,
+          output: beichenDay.outputTokens || 0,
+        }
+        const beichenTotal = beichenBucket === null ? null
+          : beichenBucket.input + beichenBucket.cacheRead + beichenBucket.output
+        // 当天三桶构成：输入 / 缓存命中 / 输出。合计那个数字由它们组成。
+        const buckets = sumBuckets(picked.ofm, picked.workbuddy, codexRow, beichenBucket)
         // 渠道行只列当天有调用的，没调用的渠道不占地方。
         const channels = CHANNELS
           .map(channel => ({ channel, row: picked.byChannel?.[channel.id] }))
@@ -2279,35 +2346,34 @@ window.__ModuleLoader__.load({
               'data-act': 'stats-next',
             }, '›')),
 
-          // 三个大数字：合计 / OFM / WorkBuddy。
+          // 五个大数字：合计 / OFM / WorkBuddy / GPT 订阅 / 北辰。
           h('div', { style: style.statsTotals },
             h('div', { style: style.statsTotalCell },
               h('div', { style: style.statsTotalLabel }, t('statsTotal')),
               h('div', { style: style.statsTotalValue },
-                formatTokens((ofmTotal || 0) + (wbTotal || 0)))),
+                formatTokens((ofmTotal || 0) + (wbTotal || 0) + (codexTotal || 0) + (beichenTotal || 0)))),
             h('div', { style: style.statsTotalCell },
               h('div', { style: style.statsTotalLabel }, t('statsOfm')),
               h('div', { style: style.statsTotalValue }, formatTokens(ofmTotal))),
             h('div', { style: style.statsTotalCell },
               h('div', { style: style.statsTotalLabel }, t('statsWb')),
-              h('div', { style: style.statsTotalValue, 'data-wb-token-total': 'true' }, formatTokens(wbTotal)))),
-
-          // 北辰 API：跟上面同一套日期条翻历史。接口只回当天，这里的每一天
-          // 都是 Host 逐日攒下来的——接上之前的日子本来就没有数，留占位。
-          beichen === null || beichen.configured === false ? null : (() => {
-            const day = usageOfDate(Array.isArray(beichen.days) ? beichen.days : [], picked.date)
-            return h('div', {
-              style: {
-                display: 'flex', alignItems: 'baseline', gap: 8, padding: '6px 2px 2px',
-                fontSize: 11, color: 'var(--dsw-alias-label-secondary, #888)',
-              },
-              'data-beichen': 'day',
-            },
-              h('span', { style: { width: 3, alignSelf: 'stretch', borderRadius: 2, background: '#4C8DFF' } }),
-              h('span', { style: { fontWeight: 600 } }, t('beichenName')),
-              h('span', null, day === null ? t('statsEmpty') : `${formatTokens(day.totalTokens)} tok`),
-              h('span', { style: { marginLeft: 'auto' } }, day === null ? '' : `−$${day.actualCost.toFixed(2)}`))
-          })(),
+              h('div', { style: style.statsTotalValue, 'data-wb-token-total': 'true' }, formatTokens(wbTotal))),
+            h('div', { style: style.statsTotalCell },
+              h('div', { style: style.statsTotalLabel }, t('statsCodex')),
+              h('div', { style: { ...style.statsTotalValue }, 'data-codex-token-total': 'true' },
+                codexTotal === null ? '0' : formatTokens(codexTotal))),
+            h('div', { style: style.statsTotalCell },
+              h('div', { style: style.statsTotalLabel }, t('statsBeichen')),
+              h('div', { style: style.statsTotalValue, 'data-beichen-token-total': 'true' },
+                beichenTotal === null ? '0' : formatTokens(beichenTotal)))),
+          // 三桶构成：合计由输入 / 缓存命中 / 输出组成。缓存读通常占大头，
+          // 不拆开就说不清这些 token 花在哪一项。
+          h('div', { style: style.statsBuckets, 'data-stats-buckets': 'true' },
+            fill(t('statsBuckets'), {
+              input: formatTokens(buckets.input),
+              cache: formatTokens(buckets.cacheRead),
+              output: formatTokens(buckets.output),
+            })),
 
           // 渠道明细：当天有调用的渠道逐行列出。高度可调，超出部分自己滚动——
           // 渠道多的日子里，这一区是唯一会变长的地方。
@@ -2315,17 +2381,44 @@ window.__ModuleLoader__.load({
             style: statsSplit === null ? style.statsListAuto : { ...style.statsList, height: statsSplit },
             'data-stats-list': 'true',
           },
-            channels.length === 0
+            channels.length === 0 && codexTotal === null
               ? h('div', { style: style.statsHint }, t('statsEmpty'))
-              : channels.map(item => h('div', {
-                key: item.channel.id, style: style.statsRow, className: 'ofm-row', 'data-stats-channel': item.channel.id,
-              },
-                h('span', { style: { ...style.stripe, background: item.channel.accent } }),
-                h('span', { style: style.statsNameCell },
-                  h('span', { style: style.statsName }, item.channel.name),
-                  h('span', { style: style.meta }, fill(t('statsCalls'), { count: item.row.calls || 0 }))),
-                h('span', { style: style.statsAmount }, formatTokens(totalTokens(item.row))),
-              ))),
+              : [
+                ...channels.map(item => h('div', {
+                  key: item.channel.id, style: style.statsRow, className: 'ofm-row', 'data-stats-channel': item.channel.id,
+                },
+                  h('span', { style: { ...style.stripe, background: item.channel.accent } }),
+                  h('span', { style: style.statsNameCell },
+                    h('span', { style: style.statsName }, item.channel.name),
+                    // 输入 / 缓存命中 / 输出：总量下面那行小字说明构成。
+                    h('span', { style: style.meta }, breakdownText(item.row))),
+                  h('span', { style: style.statsNumbers },
+                    h('span', { style: style.statsAmount }, formatTokens(totalTokens(item.row))),
+                    h('span', { style: style.statsCalls }, fill(t('statsCalls'), { count: item.row.calls || 0 }))),
+                )),
+                // GPT 订阅：与渠道并列，但走订阅线路自己的身份色，别被当成 OFM 渠道。
+                codexTotal === null ? null : h('div', {
+                  key: '__codex', style: style.statsRow, className: 'ofm-row', 'data-stats-codex': 'row',
+                },
+                  h('span', { style: { ...style.stripe, background: 'var(--dsw-alias-brand-primary, #4b7bec)' } }),
+                  h('span', { style: style.statsNameCell },
+                    h('span', { style: style.statsName }, t('statsCodex')),
+                    h('span', { style: style.meta }, breakdownText(codexRow))),
+                  h('span', { style: style.statsNumbers },
+                    h('span', { style: style.statsAmount }, formatTokens(codexTotal)),
+                    h('span', { style: style.statsCalls }, fill(t('statsCalls'), { count: codexRow.calls || 0 })))),
+                // 北辰：网关侧的上游，与 OFM 渠道同一套三桶；右侧小字给当天扣费。
+                beichenTotal === null ? null : h('div', {
+                  key: '__beichen', style: style.statsRow, className: 'ofm-row', 'data-stats-beichen': 'row',
+                },
+                  h('span', { style: { ...style.stripe, background: '#4C8DFF' } }),
+                  h('span', { style: style.statsNameCell },
+                    h('span', { style: style.statsName }, t('statsBeichen')),
+                    h('span', { style: style.meta }, breakdownText(beichenBucket))),
+                  h('span', { style: style.statsNumbers },
+                    h('span', { style: style.statsAmount }, formatTokens(beichenTotal)),
+                    h('span', { style: style.statsCalls }, `−$${(beichenDay?.actualCost || 0).toFixed(2)}`))),
+              ]),
 
           // 分隔条：上下拖动改变明细区高度，双击复位成随内容自适应。
           // 平时只是一条边线，鼠标贴上去才透出提示色——与卡片边缘同一手感。
@@ -2470,9 +2563,9 @@ window.__ModuleLoader__.load({
               ? t('beichenNoData')
               : `${t('wbToday')} ${spent} · ${formatTokens(today.totalTokens ?? 0)}`),
             caretOf(beichenOpen)),
-          !beichenOpen ? null : h('div', null,
+          !beichenOpen ? null : h('div', null, [
             // 余额行：与上面渠道行同宽的空色条，让两列对齐到同一条竖线。
-            h('div', { style: style.wbRow, className: 'ofm-row', 'data-beichen-row': 'balance' },
+            h('div', { key: 'balance', style: style.wbRow, className: 'ofm-row', 'data-beichen-row': 'balance' },
               h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
               h('span', { style: style.wbNameCell },
                 h('span', { style: style.wbName }, t('beichenBalance')),
@@ -2480,14 +2573,41 @@ window.__ModuleLoader__.load({
               h('span', { style: style.wbCell }, beichenToday === null ? '·' : fill(t('statsCalls'), { count: today.requests ?? 0 })),
               h('span', { style: { ...style.wbAmount, color: TONE[toneOf(beichenBalance, 'USD')] } },
                 formatAmount(beichenBalance, 'USD'))),
-            // 用量行：今日 token 与扣费。缓存读取单独列出来，钱主要花在这上面。
-            h('div', { style: style.wbRow, className: 'ofm-row', 'data-beichen-row': 'tokens' },
+            // 用量行：今日 token 与扣费。三桶拆开，钱主要花在缓存读上。
+            h('div', { key: 'tokens', style: style.wbRow, className: 'ofm-row', 'data-beichen-row': 'tokens' },
               h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
               h('span', { style: style.wbNameCell },
                 h('span', { style: style.wbName }, t('beichenTokens')),
-                h('span', { style: style.meta }, `${t('beichenCache')} ${formatTokens(today.cacheReadTokens ?? 0)}`)),
+                h('span', { style: style.meta }, breakdownText({
+                  input: today.inputTokens,
+                  cacheRead: today.cacheReadTokens,
+                  output: today.outputTokens,
+                }))),
               h('span', { style: style.wbCell }, beichenToday === null ? '·' : spent),
-              h('span', { style: style.wbAmount }, formatTokens(today.totalTokens ?? 0)))))
+              h('span', { style: style.wbAmount }, formatTokens(today.totalTokens ?? 0))),
+            // 按模型明细：接口给的是累计口径、不分日，所以单列一行标题，
+            // 免得这些数被当成「今天」的用量。
+            ...(beichenModels.length === 0 ? [] : [
+              h('div', { key: 'models', style: { ...style.wbEmpty, paddingTop: 5 } }, t('beichenModels')),
+              ...beichenModels.map(row => h('div', {
+                key: row.model,
+                style: { ...style.wbRow, paddingLeft: 18 },
+                className: 'ofm-row',
+                'data-beichen-model': row.model,
+              },
+                h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
+                h('span', { style: style.wbNameCell },
+                  h('span', { style: style.wbName, title: row.model }, row.model),
+                  h('span', { style: style.meta }, breakdownText({
+                    input: row.inputTokens,
+                    cacheRead: row.cacheReadTokens,
+                    output: row.outputTokens,
+                  }))),
+                h('span', { style: style.wbCell }, fill(t('statsCalls'), { count: row.requests })),
+                h('span', { style: style.wbAmount }, `−$${(row.actualCost || 0).toFixed(2)}`))),
+            ]),
+          ]),
+        )
       })()
 
 
@@ -2694,7 +2814,7 @@ window.__ModuleLoader__.load({
               h('span', { style: { ...style.stripe, background: row.accent } }),
               h('span', { style: style.wbNameCell },
                 h('span', { style: style.wbName }, row.name),
-                h('span', { style: style.meta }, fill(t('statsCalls'), { count: row.calls }))),
+                h('span', { style: style.meta }, breakdownText(row))),
               // 今日积分消耗：从旧渠道行迁来的口径；没消耗显示 ·。
               h('span', {
                 style: {

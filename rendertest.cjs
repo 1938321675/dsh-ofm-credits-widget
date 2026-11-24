@@ -215,8 +215,9 @@ function wbRows() {
 // ── 北辰 API：读数到达后多出一行 ─────────────────────────────────────────
 const beichenReading = {
   configured: true, ok: true, balance: 0.58, unit: 'USD',
-  today: { date: '2026-11-17', requests: 3, totalTokens: 1_200_000, actualCost: 0.42 },
-  days: [{ date: '2026-11-17', requests: 3, totalTokens: 1_200_000, actualCost: 0.42 }],
+  today: { date: '2026-11-17', requests: 3, inputTokens: 100_000, outputTokens: 20_000, cacheReadTokens: 1_080_000, totalTokens: 1_200_000, actualCost: 0.42 },
+  days: [{ date: '2026-11-17', requests: 3, inputTokens: 100_000, outputTokens: 20_000, cacheReadTokens: 1_080_000, totalTokens: 1_200_000, actualCost: 0.42 }],
+  models: [{ model: 'gpt-6.1', requests: 2, inputTokens: 90_000, outputTokens: 18_000, cacheReadTokens: 980_000, totalTokens: 998_000, actualCost: 0.3 }],
 }
 check('北辰读数到达后出现独立分区',
   hasBeichen(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: beichenReading })), true)
@@ -229,6 +230,22 @@ check('北辰没有读数时不出现分区',
 
 check('没配北钥时不出现分区',
   hasBeichen(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.beichen]: { configured: false, ok: false, balance: null, days: [] } })), false)
+
+// 按模型明细：接口给的是累计口径，界面单列一行标题，不让这些数被当成「今天」。
+const beichenOpenTree = render({
+  [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+  [IDX.beichen]: beichenReading, [IDX.beichenOpen]: true,
+})
+check('北辰展开列出按模型明细',
+  flatten(beichenOpenTree)
+    .filter(n => n.props !== undefined && n.props['data-beichen-model'] !== undefined)
+    .map(n => n.props['data-beichen-model']), ['gpt-6.1'])
+check('北辰没有模型明细时不列标题行',
+  flatten(render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.beichen]: { configured: true, ok: true, balance: 0.58, unit: 'USD', today: null, days: [], models: [] },
+    [IDX.beichenOpen]: true,
+  })).some(n => n.props !== undefined && n.props['data-beichen-model'] !== undefined), false)
 
 const codexReading = {
   available: true,
@@ -470,6 +487,58 @@ check('收起时不显示配置面板',
   // 空账本：同样是空状态。
   const emptyStats = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats', [IDX.usage]: { available: true, days: [] } })
   check('没有数据时显示空状态', statsOf(emptyStats)?.props['data-ofm-credit-watch-stats'], 'empty')
+
+  // GPT 订阅进统计：独立一行，不与 OFM 渠道共用 data-stats-channel（否则
+  // 「这一天的渠道有哪些」这类断言会被订阅线路污染）。
+  const withCodex = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.view]: 'stats',
+    [IDX.usage]: {
+      available: true,
+      days: [{
+        date: '2026-11-11',
+        ofm: { input: 100, output: 50, cacheRead: 1000, calls: 2 },
+        workbuddy: { input: 200, output: 80, cacheRead: 2000, calls: 3 },
+        byChannel: { trae: { input: 100, output: 50, cacheRead: 1000, calls: 2 } },
+        codex: { input: 500, output: 40, cacheRead: 6000, calls: 6 },
+      }],
+    },
+  })
+  const codexRow = flatten(withCodex).find(n => n.props !== undefined && n.props['data-stats-codex'] !== undefined)
+  check('统计页列出 GPT 订阅行', codexRow !== undefined, true)
+  const codexTexts = allText(withCodex).join(' ')
+  // 订阅行的小字就是三桶：入 500 · 缓 6000 · 出 40。
+  check('GPT 订阅行给出输入/缓存/输出', codexTexts.includes('入 500') && codexTexts.includes('缓 6000') && codexTexts.includes('出 40'), true)
+  // 顶部那行构成把三条线路的三桶加起来：入 800 · 缓 9000 · 出 170。
+  check('顶部给出三桶合计', codexTexts.includes('输入 800') && codexTexts.includes('缓存命中 9000') && codexTexts.includes('输出 170'), true)
+  check('顶部合计有 GPT 订阅一格', codexTexts.includes('GPT 订阅'), true)
+  // 没有订阅用量时不出这一行，也不在合计里凭空加一格数字。
+  check('没有 GPT 订阅用量时不列该行', flatten(stats).find(n => n.props !== undefined && n.props['data-stats-codex'] !== undefined), undefined)
+
+  // 北辰进统计页：合计里算它，明细区单独一行，三桶构成照拆。
+  const withBeichen = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats',
+    [IDX.usage]: {
+      available: true,
+      days: [{
+        date: '2026-11-17',
+        ofm: { input: 100, output: 50, cacheRead: 1000, calls: 2 },
+        workbuddy: { input: 200, output: 80, cacheRead: 2000, calls: 3 },
+        byChannel: { qoder: { input: 100, output: 50, cacheRead: 1000, calls: 2 } },
+      }],
+    },
+    [IDX.beichen]: beichenReading,
+  })
+  check('统计页列出北辰行',
+    flatten(withBeichen).find(n => n.props !== undefined && n.props['data-stats-beichen'] !== undefined) !== undefined, true)
+  const beichenStatsTexts = allText(withBeichen).join(' ')
+  // 北辰三桶：入 100k · 缓 1.1M · 出 20k，当天合计 1.2M。
+  check('北辰行给出三桶构成',
+    beichenStatsTexts.includes('入 100k') && beichenStatsTexts.includes('缓 1.1M') && beichenStatsTexts.includes('出 20k'), true)
+  check('统计页合计含北辰一格', beichenStatsTexts.includes('北辰 API'), true)
+  // 没有北辰读数时不出这一行，也不在合计里凭空加一格数字。
+  check('没有北辰读数时不列该行',
+    flatten(stats).find(n => n.props !== undefined && n.props['data-stats-beichen'] !== undefined), undefined)
 }
 
 // ── 4g. 回归：跨天后主界面今日 token 归零 ─────────────────────────────────

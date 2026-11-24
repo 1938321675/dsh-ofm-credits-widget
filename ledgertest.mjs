@@ -299,7 +299,7 @@ async function main() {
     check('按日期升序', stats.days.map(d => d.date), ['2026-11-10', '2026-11-11'])
 
     const first = stats.days[0]
-    // OFM 只算自己的渠道；openai-codex 不在名单里，必须排除。
+    // OFM 只算自己的渠道；订阅线路（openai-codex）另立一桶，不混进来。
     check('OFM 输入只算自己的渠道', first.ofm.input, 110)
     check('OFM 输出', first.ofm.output, 55)
     check('OFM 缓存读', first.ofm.cacheRead, 1100)
@@ -309,6 +309,11 @@ async function main() {
     check('渠道明细按 provider 归并', first.byChannel.qoder.input, 100)
     check('模型名带冒号也切对', first.byChannel.trae.input, 10)
     check('未出现的渠道不在明细里', first.byChannel.raccoon, undefined)
+    // GPT 订阅：独立一桶，既不进 OFM 渠道明细，也不进 WorkBuddy。
+    check('GPT 订阅单独成桶', first.codex.input, 999)
+    check('GPT 订阅调用数', first.codex.calls, 9)
+    check('GPT 订阅不进渠道明细', first.byChannel['openai-codex'], undefined)
+    check('没有订阅用量的那天是空桶', stats.days[1].codex.calls, 0)
 
     // 账本不存在：available 为 false，days 为空。
     process.env.OFM_COST_METER_LEDGER = path.join(dir, 'nope.json')
@@ -325,6 +330,20 @@ async function main() {
     check('缓存命中返回同一对象', a === b, true)
     delete process.env.OFM_CREDIT_WATCH_DIR === undefined ? 'x' : 'x'
     delete process.env.OFM_COST_METER_LEDGER
+  }
+  // 北辰按模型明细：累计口径，按 token 量降序，缺模型名的行丢弃。
+  {
+    const models = t.normalizeBeichenModels([
+      { model: 'gpt-6.1-sol', requests: 2, input_tokens: 100, output_tokens: 20, cache_read_tokens: 800, total_tokens: 920, actual_cost: 1.2 },
+      { model: 'gpt-6.2-sol', requests: 1, input_tokens: 5, output_tokens: 1, cache_read_tokens: 0, total_tokens: 6, actual_cost: 0.3 },
+      { requests: 1 },
+      { model: '', total_tokens: 999 },
+    ])
+    check('北辰模型明细只留有模型名的行', models.map(m => m.model), ['gpt-6.1-sol', 'gpt-6.2-sol'])
+    check('北辰模型明细按 token 量降序', models[0].model, 'gpt-6.1-sol')
+    check('北辰模型明细输入桶', models[0].inputTokens, 100)
+    check('北辰模型明细缓存读桶', models[0].cacheReadTokens, 800)
+    check('北辰模型明细非数组入参返回空列表', t.normalizeBeichenModels(null), [])
   }
 
   if (failures.length > 0) {

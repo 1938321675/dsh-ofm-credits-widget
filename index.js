@@ -674,7 +674,15 @@ function mergeLocalDays(days) {
     if (cx !== null && typeof cx === 'object') addUsage(codex, cx)
     const existing = days.find(row => row.date === date)
     if (existing === undefined) days.push({ date, ofm, workbuddy, byChannel, codex })
-    else { existing.ofm = ofm; existing.workbuddy = workbuddy; existing.byChannel = byChannel; existing.codex = codex }
+    else {
+      existing.ofm = ofm
+      existing.workbuddy = workbuddy
+      existing.byChannel = byChannel
+      // codex 只在本地区账本真有记录时才覆盖：cost-meter 那边可能留着本插件
+      // 尚未采到的那一段历史，本地是空桶时把它抹成 0，统计页的 GPT 订阅
+      // 行就会凭空消失。
+      if (codex.calls > 0 || codex.input + codex.output + codex.cacheRead > 0) existing.codex = codex
+    }
   }
 }
 
@@ -757,24 +765,30 @@ function readUsageStats() {
 
   const ofmSet = new Set(OFM_PROVIDERS)
   const wbSet = new Set(WORKBUDDY_PROVIDERS)
+  const codexSet = new Set(CODEX_PROVIDERS)
   const days = []
   for (const [date, day] of Object.entries(ledger?.days ?? {})) {
     const rows = day?.byProviderModel
     if (rows === null || typeof rows !== 'object') continue
     const ofm = emptyUsage()
     const workbuddy = emptyUsage()
+    const codex = emptyUsage()
     const byChannel = {}
     for (const [prefix, row] of Object.entries(rows)) {
       // 账本键是 `provider:model`；模型名里可能还有冒号，只切第一个。
       const colon = prefix.indexOf(':')
       const provider = colon === -1 ? prefix : prefix.slice(0, colon)
       if (wbSet.has(provider)) { addUsage(workbuddy, row); continue }
+      // GPT 订阅线路（openai-codex）与 WorkBuddy 同一种算法：整条线路合成
+      // 一个桶。订阅额度按百分比计、用量按 token 计，两者一起才说得清
+      // 「这点余量是被多少 token 吃掉的」。
+      if (codexSet.has(provider)) { addUsage(codex, row); continue }
       if (!ofmSet.has(provider)) continue
       addUsage(ofm, row)
       if (byChannel[provider] === undefined) byChannel[provider] = emptyUsage()
       addUsage(byChannel[provider], row)
     }
-    days.push({ date, ofm, workbuddy, byChannel })
+    days.push({ date, ofm, workbuddy, byChannel, codex })
   }
   mergeLocalDays(days)
   days.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
@@ -843,6 +857,32 @@ function countOf(value) {
   return Number.isFinite(n) && n >= 0 ? n : 0
 }
 
+/**
+ * 把接口的按模型明细归一成插件自己的字段名。
+ *
+ * model_stats 是累计口径（对应接口的 usage.total），不分日，因此只用于分区里的
+ * 模型明细，不进「今天」的统计。
+ */
+function normalizeBeichenModels(rows) {
+  if (!Array.isArray(rows)) return []
+  return rows
+    .map(row => {
+      const model = typeof row?.model === 'string' ? row.model.trim() : ''
+      if (model === '') return null
+      return {
+        model,
+        requests: countOf(row?.requests),
+        inputTokens: countOf(row?.input_tokens),
+        outputTokens: countOf(row?.output_tokens),
+        cacheReadTokens: countOf(row?.cache_read_tokens),
+        totalTokens: countOf(row?.total_tokens),
+        actualCost: countOf(row?.actual_cost),
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.totalTokens - a.totalTokens)
+}
+
 /** 把接口的一天归一成插件自己的字段名。 */
 function normalizeBeichenDay(row) {
   if (row === null || typeof row !== 'object') return null
@@ -897,6 +937,10 @@ async function fetchBeichen() {
   const cutoff = String(floor.getFullYear()) + '-' + pad(floor.getMonth() + 1) + '-' + pad(floor.getDate())
   for (const key2 of Object.keys(state.days)) if (key2 < cutoff) delete state.days[key2]
   writeBeichenDays(state)
+  // 按模型明细（model_stats）是「累计」口径，接口不分日：它对应 usage.total，
+  // 与上面的 daily_usage 不是一回事。这里照原样带回，由界面标注清楚，
+  // 不混进某一天的统计里。
+  const models = normalizeBeichenModels(body?.model_stats)
   const merged = Object.values(state.days).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
   const todayKey = new Date().toLocaleDateString('sv-SE')
   const today = merged.find(row => row.date === todayKey) ?? null
@@ -909,6 +953,7 @@ async function fetchBeichen() {
     mode: typeof body?.mode === 'string' ? body.mode : '',
     today,
     days: merged,
+    models,
   }
 }
 
@@ -1218,7 +1263,7 @@ export const __test = {
   commitReadings, readLedger, normalizeLast, todayKey, round2, ledgerDir,
   wbKey, readWorkBuddyLedger, commitWorkBuddy, WB_STALE_MS, WB_RESAVE_MS, RESAVE_MS, STALE_MS,
   readUsageStats, usageLedgerFile, OFM_PROVIDERS, WORKBUDDY_PROVIDERS, usageCache,
-  fetchBeichen, readBeichen, readBeichenKey, beichenFile,
+  fetchBeichen, readBeichen, readBeichenKey, beichenFile, normalizeBeichenModels,
   readCodexQuota, readOfmTokenUsage,
   recordTokenUsage, readLocalTokenUsage, tokensFile, bucketsOf,
   backfillTodayFromSessionLogs, listSessionLogs, decompressSessionLog, CODEX_PROVIDERS,
