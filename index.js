@@ -819,6 +819,35 @@ function beichenFile() {
   return path.join(ledgerDir(), 'beichen-days.json')
 }
 
+/** 北辰余额基准：只存上一轮的合计余额与采样时刻，用来补当天没有账单行的那段。 */
+function beichenLastFile() {
+  return path.join(ledgerDir(), 'beichen-last.json')
+}
+
+/**
+ * 用余额差补今天的消耗。
+ *
+ * 网关的 daily_usage 要等结算后才落当天那行，盘中当天常常查不到，而余额每轮都在
+ * 真实下降。这里取相邻两轮的合计余额差：余额下降就累加进当天，余额上升（充值、
+ * 签到）不算负消耗；基准过旧或跨天则不记——那笔差值归属不明，与 OFM 渠道同一套
+ * 判断，宁可少记也不把昨天的账记到今天。
+ */
+function commitBeichenBalance(balance, hasTodayRow) {
+  if (!Number.isFinite(balance)) return null
+  const at = Date.now()
+  const date = todayKey()
+  const last = readJson(beichenLastFile(), null)
+  const prevTotal = last !== null && Number.isFinite(last.total) ? last.total : null
+  const prevAt = last !== null && Number.isFinite(last.at) ? last.at : 0
+  const prevDate = last !== null && typeof last.date === 'string' ? last.date : ''
+  const tooOld = prevAt === 0 || at - prevAt > STALE_MS || prevDate !== date
+  const delta = prevTotal === null || tooOld ? 0 : prevTotal - balance
+  writeJson(beichenLastFile(), { at, date, total: balance })
+  // 接口已经给出当天账单行时以接口为准，不再用余额差重复计。
+  if (hasTodayRow || delta <= 0) return hasTodayRow ? null : 0
+  return round2(delta)
+}
+
 /**
  * 解析全部北辰 API Key（支持多分组）。
  *
@@ -826,7 +855,8 @@ function beichenFile() {
  * 分组的 Key 都取一遍再合并。解析顺序与去重：
  *   1. 环境变量 `BEICHEN_API_KEYS`——逗号或换行分隔的键列表（多分组主入口）；
  *   2. 环境变量 `BEICHEN_MAIN_API_KEY`——单键（保留原约定）；
- *   3. `~/.dsh/.credentials.yaml` 里的 `BEICHEN_API_KEYS` 与 `BEICHEN_MAIN_API_KEY`。
+ *   3. `~/.dsh/.credentials.yaml` 里的 `BEICHEN_API_KEYS` 列表与全部 `BEICHEN*_API_KEY` 命名条目
+ *      （每个分组各占一个条目，如 `BEICHEN_MAIN_API_KEY`、`BEICHEN_CC_API_KEY`）。
  * 空串与重复项会被丢掉。
  */
 function readBeichenKeys() {
@@ -850,8 +880,10 @@ function readBeichenKeys() {
     const text = readFileSync(path.join(DSH_HOME, '.credentials.yaml'), 'utf8')
     const listMatch = text.match(/^\s*BEICHEN_API_KEYS\s*:\s*(.*(?:\n[ \t]+.*)*)/m)
     if (listMatch !== null) push(listMatch[1])
-    const mainMatch = text.match(/^\s*BEICHEN_MAIN_API_KEY\s*:\s*['\"]?([^'\"\s#]+)/m)
-    if (mainMatch !== null) push(mainMatch[1])
+    // 每个分组各占一个独立命名条目（BEICHEN_MAIN_API_KEY、BEICHEN_CC_API_KEY……），
+    // 只认 MAIN 会漏掉其余分组，因此按前缀扫描全部 *_API_KEY 条目。
+    const namedMatches = text.matchAll(/^\s*(BEICHEN[A-Z0-9_]*_API_KEY)\s*:\s*['\"]?([^'\"\s#]+)/gm)
+    for (const match of namedMatches) push(match[2])
   } catch { /* 没有凭据文件时只看环境变量 */ }
   return keys
 }
@@ -1023,14 +1055,47 @@ async function fetchBeichen() {
       const day = normalizeBeichenDay(row)
       if (day !== null) dayRows.push(day)
     }
+    // 网关的 daily_usage 要等结算后才落当天这一行，盘中当天常常还查不到；但同一份
+    // 响应里的 usage.today 就是当前 Key 的当天汇总。当日行缺席时用它补，避免当天
+    // 一直显示「今日暂无调用」。
+    const todayUsage = body?.usage?.today
+    if (todayUsage !== null && typeof todayUsage === 'object') {
+      const todayKey = new Date().toLocaleDateString('sv-SE')
+      if (!dayRows.some(row => row.date === todayKey)) {
+        const day = normalizeBeichenDay({ ...todayUsage, date: todayKey })
+        if (day !== null && (day.requests > 0 || day.totalTokens > 0 || day.actualCost > 0 || day.cost > 0)) dayRows.push(day)
+      }
+    }
     for (const row of Array.isArray(body?.model_stats) ? body.model_stats : []) modelRows.push(row)
     balances.push(countOf(body?.balance ?? body?.remaining))
     if (plan === '' && typeof body?.planName === 'string') plan = body.planName
     if (mode === '' && typeof body?.mode === 'string') mode = body.mode
   }
 
+  // 全部响应都成功却没有账单行，是盘中常态（当天那行要等结算才落），不能当成
+  // 取数失败：此时余额照样可信，当天消耗用两轮余额差补。
   if (dayRows.length === 0 && modelRows.length === 0) {
-    return { configured: true, ok: false, error: errors[0] ?? 'empty', balance: null, unit: 'USD', today: null, days }
+    if (errors.length === keys.length) {
+      return { configured: true, ok: false, error: errors[0] ?? 'empty', balance: null, unit: 'USD', today: null, days }
+    }
+    const balanceOnly = round2(balances.reduce((sum, n) => sum + n, 0))
+    const onlyBalanced = commitBeichenBalance(balanceOnly, false)
+    const todayOnly = typeof onlyBalanced === 'number' && onlyBalanced > 0
+      ? { date: new Date().toLocaleDateString('sv-SE'), requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, cost: 0, actualCost: onlyBalanced }
+      : null
+    // 当天的量要累积回已存的历史：本轮差额只是「这两轮之间花了多少」，
+    // 之前几轮记下的同一天消耗还在账本里，覆盖掉就等于把它们抹了。
+    const withToday = readBeichenDays()
+    const todayKeyOnly = new Date().toLocaleDateString('sv-SE')
+    const storedToday = withToday.days[todayKeyOnly]
+    if (todayOnly !== null) {
+      const accumulated = round2((Number.isFinite(storedToday?.actualCost) ? storedToday.actualCost : 0) + todayOnly.actualCost)
+      withToday.days[todayKeyOnly] = { ...todayOnly, actualCost: accumulated }
+      writeBeichenDays(withToday)
+    }
+    const mergedDays2 = Object.values(withToday.days).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+    const todayFinal = mergedDays2.find(row => row.date === todayKeyOnly) ?? null
+    return { configured: true, ok: true, balance: balanceOnly, unit: 'USD', plan, mode, today: todayFinal, days: mergedDays2, models: [], keyCount: keys.length, errors }
   }
 
   const mergedDays = mergeBeichenDays(dayRows)
@@ -1047,16 +1112,36 @@ async function fetchBeichen() {
   writeBeichenDays(state)
 
   const todayKey = new Date().toLocaleDateString('sv-SE')
-  const today = mergedDays.find(row => row.date === todayKey) ?? null
+  // 当天没有账单行时，用两轮合计余额的差额补一段；接口补上当天行后自动停用。
+  const balanceSum = balances.reduce((sum, n) => sum + n, 0)
+  const hasTodayRow = mergedDays.some(row => row.date === todayKey)
+  const balanced = commitBeichenBalance(balanceSum, hasTodayRow)
+  // 当天的量可能来自接口账单行，也可能是前几轮用余额差补的，两者都要累计在同一处：
+  // 接口给了当天行就以它为准（覆盖补记），没给就保留账本里已累积的余额差。
+  const storedToday = state.days[todayKey] ?? null
+  let today = mergedDays.find(row => row.date === todayKey) ?? null
+  if (today === null && typeof balanced === 'number' && balanced > 0) {
+    const accumulated = round2((Number.isFinite(storedToday?.actualCost) ? storedToday.actualCost : 0) + balanced)
+    today = { date: todayKey, requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, cost: 0, actualCost: accumulated }
+    state.days[todayKey] = today
+  } else if (today === null && storedToday !== null) {
+    today = storedToday
+  }
+  // 上面的 state 在第 1112 行已经落过盘，补记的当天行是之后才加进去的，必须再写一次，
+  // 否则下一轮读回账本时找不到它，界面就会在「有今天」和「没有今天」之间反复闪。
+  if (today !== null && state.days[todayKey] !== undefined) writeBeichenDays(state)
+  // 返回的天数一律以账本为准：接口行与余额差补记混在同一份里，界面翻日期条才不会
+  // 出现「刚显示过今天有消耗、下一轮又变空」。
+  const allDays = Object.values(state.days).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
   return {
     configured: true,
     ok: true,
-    balance: balances.reduce((sum, n) => sum + n, 0),
+    balance: balanceSum,
     unit: 'USD',
     plan,
     mode,
     today,
-    days: mergedDays,
+    days: allDays,
     models,
     keyCount: keys.length,
     errors,

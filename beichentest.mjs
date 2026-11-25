@@ -155,22 +155,54 @@ async function main() {
   }
 
   // ── Key 解析：凭据文件的多键列表与单键两种写法 ─────────────────────────
+  // 凭据里同时放列表、MAIN 与另一个分组的独立命名条目。
   fs.writeFileSync(path.join(homeTemp, '.credentials.yaml'), [
     'BEICHEN_API_KEYS:',
     '  - yaml-a',
     '  - yaml-b',
     'BEICHEN_MAIN_API_KEY: yaml-main',
+    'BEICHEN_CC_API_KEY: yaml-cc',
     '',
   ].join('\n'), 'utf8')
   {
     delete process.env.BEICHEN_API_KEYS
     delete process.env.BEICHEN_MAIN_API_KEY
-    check('凭据列表与单键都解析', t.readBeichenKeys(), ['yaml-a', 'yaml-b', 'yaml-main'])
+    check('列表、MAIN 与独立命名条目都解析', t.readBeichenKeys(), ['yaml-a', 'yaml-b', 'yaml-main', 'yaml-cc'])
   }
   {
     process.env.BEICHEN_API_KEYS = 'yaml-a,env-x'
-    check('环境变量键与凭据合并且去重', t.readBeichenKeys(), ['yaml-a', 'env-x', 'yaml-b', 'yaml-main'])
+    check('环境变量键与凭据合并且去重', t.readBeichenKeys(), ['yaml-a', 'env-x', 'yaml-b', 'yaml-main', 'yaml-cc'])
     delete process.env.BEICHEN_API_KEYS
+  }
+
+  // ── 当天没有账单行：用两轮余额差补当天 ───────────────────────────────
+  {
+    const checkoutDays = fs.readdirSync(ledgerTemp).filter(n => n.startsWith('beichen'))
+    for (const name of checkoutDays) fs.rmSync(path.join(ledgerTemp, name), { force: true })
+    // 上一节写进凭据文件的 yaml-* 会被一并解析成额外分组，先清掉再只留本节两个 Key。
+    fs.rmSync(path.join(homeTemp, '.credentials.yaml'), { force: true })
+    process.env.BEICHEN_API_KEYS = 'key-a,key-b'
+    let round = 0
+    globalThis.fetch = async (url, options) => {
+      const key = options?.headers?.Authorization?.replace('Bearer ', '')
+      // 两轮余额相同：首轮没基准不记；第二轮才降了 0.5。
+      const balance = round === 0 ? 30 : 29.5
+      if (key === 'key-a') return { ok: true, status: 200, json: async () => ({ balance: balance / 2, daily_usage: [], model_stats: [] }) }
+      return { ok: true, status: 200, json: async () => ({ balance: balance / 2, daily_usage: [], model_stats: [] }) }
+    }
+    try {
+      const first = await t.fetchBeichen()
+      check('首轮无基准不补当天', first.today, null)
+      round = 1
+      const second = await t.fetchBeichen()
+      checkTrue('第二轮用余额差补出当天', second.today !== null)
+      check('余额差记入当天 actualCost', second.today?.actualCost, 0.5)
+      const thirdRound = await t.fetchBeichen()
+      check('余额不变不重复记，当天维持已累积值', thirdRound.today?.actualCost, 0.5)
+    } finally {
+      globalThis.fetch = realFetch
+      delete process.env.BEICHEN_API_KEYS
+    }
   }
 
   if (failures.length > 0) {
