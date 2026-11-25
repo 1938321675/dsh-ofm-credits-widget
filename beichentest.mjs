@@ -97,7 +97,8 @@ async function main() {
     const out = await t.fetchBeichen()
     check('两个分组都取到', out.keyCount, 2)
     check('取数成功', out.ok, true)
-    check('余额跨分组求和', out.balance, 30)
+    // 两个分组是同一个账户：余额取最大值，不相加。
+    check('余额取账户级最大值', out.balance, 20)
     check('当天只有一条', out.days.length, 1)
     check('当天 cost 相加', out.today.cost, 5)
     check('当天 actualCost 相加', out.today.actualCost, 2.5)
@@ -181,14 +182,13 @@ async function main() {
     for (const name of checkoutDays) fs.rmSync(path.join(ledgerTemp, name), { force: true })
     // 上一节写进凭据文件的 yaml-* 会被一并解析成额外分组，先清掉再只留本节两个 Key。
     fs.rmSync(path.join(homeTemp, '.credentials.yaml'), { force: true })
-    process.env.BEICHEN_API_KEYS = 'key-a,key-b'
+    // 单 Key：余额差就是账户余额差，口径清晰。
+    process.env.BEICHEN_API_KEYS = 'key-a'
     let round = 0
-    globalThis.fetch = async (url, options) => {
-      const key = options?.headers?.Authorization?.replace('Bearer ', '')
-      // 两轮余额相同：首轮没基准不记；第二轮才降了 0.5。
+    globalThis.fetch = async () => {
+      // 首轮 30 只立基准；第二轮降到 29.5，差额 0.5 记入当天。
       const balance = round === 0 ? 30 : 29.5
-      if (key === 'key-a') return { ok: true, status: 200, json: async () => ({ balance: balance / 2, daily_usage: [], model_stats: [] }) }
-      return { ok: true, status: 200, json: async () => ({ balance: balance / 2, daily_usage: [], model_stats: [] }) }
+      return { ok: true, status: 200, json: async () => ({ balance, daily_usage: [], model_stats: [] }) }
     }
     try {
       const first = await t.fetchBeichen()
@@ -199,6 +199,46 @@ async function main() {
       check('余额差记入当天 actualCost', second.today?.actualCost, 0.5)
       const thirdRound = await t.fetchBeichen()
       check('余额不变不重复记，当天维持已累积值', thirdRound.today?.actualCost, 0.5)
+    } finally {
+      globalThis.fetch = realFetch
+      delete process.env.BEICHEN_API_KEYS
+    }
+  }
+
+  // ── 余额是账户级：各分组读到同一钱包，取最大值而不是相加 ─────────────
+  {
+    for (const name of fs.readdirSync(ledgerTemp).filter(n => n.startsWith('beichen'))) {
+      fs.rmSync(path.join(ledgerTemp, name), { force: true })
+    }
+    fs.rmSync(path.join(homeTemp, '.credentials.yaml'), { force: true })
+    process.env.BEICHEN_API_KEYS = 'key-a,key-b'
+    // 两个分组的 Key 都返回同一个账户余额 11.4。
+    globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ balance: 11.4, daily_usage: [], model_stats: [] }) })
+    try {
+      const out = await t.fetchBeichen()
+      check('同账户多分组余额取最大值', out.balance, 11.4)
+      checkTrue('不把余额相加成两倍', out.balance !== 22.8)
+    } finally {
+      globalThis.fetch = realFetch
+      delete process.env.BEICHEN_API_KEYS
+    }
+  }
+
+  // ── 旧口径（求和）基准不参与记账，避免算出一笔假消耗 ───────────────────
+  {
+    for (const name of fs.readdirSync(ledgerTemp).filter(n => n.startsWith('beichen'))) {
+      fs.rmSync(path.join(ledgerTemp, name), { force: true })
+    }
+    fs.rmSync(path.join(homeTemp, '.credentials.yaml'), { force: true })
+    process.env.BEICHEN_API_KEYS = 'key-a'
+    const today = new Date().toLocaleDateString('sv-SE')
+    // 旧版本留下的求和基准 22.8，与现在的账户级余额 11.4 相差一倍多。
+    fs.writeFileSync(path.join(ledgerTemp, 'beichen-last.json'),
+      JSON.stringify({ at: Date.now(), date: today, total: 22.8 }), 'utf8')
+    globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ balance: 11.4, daily_usage: [], model_stats: [] }) })
+    try {
+      const out = await t.fetchBeichen()
+      check('跨口径旧基准不记假消耗', out.today, null)
     } finally {
       globalThis.fetch = realFetch
       delete process.env.BEICHEN_API_KEYS

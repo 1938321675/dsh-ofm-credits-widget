@@ -819,7 +819,10 @@ function beichenFile() {
   return path.join(ledgerDir(), 'beichen-days.json')
 }
 
-/** 北辰余额基准：只存上一轮的合计余额与采样时刻，用来补当天没有账单行的那段。 */
+/** 余额口径标记：账户级（各分组取最大值）。基准里带着它，跨口径的旧基准不参与记账。 */
+const BEICHEN_BALANCE_BASIS = 'account'
+
+/** 北辰余额基准：只存上一轮的账户级余额与采样时刻，用来补当天没有账单行的那段。 */
 function beichenLastFile() {
   return path.join(ledgerDir(), 'beichen-last.json')
 }
@@ -840,9 +843,12 @@ function commitBeichenBalance(balance, hasTodayRow) {
   const prevTotal = last !== null && Number.isFinite(last.total) ? last.total : null
   const prevAt = last !== null && Number.isFinite(last.at) ? last.at : 0
   const prevDate = last !== null && typeof last.date === 'string' ? last.date : ''
-  const tooOld = prevAt === 0 || at - prevAt > STALE_MS || prevDate !== date
+  // 口径标记：早期版本把各组余额相加存进基准，与现在的账户级余额差了一倍多。
+  // 没有这个标记的旧基准只用来刷新，不参与记账，否则会算出一笔巨额假消耗。
+  const prevBasis = last !== null && last.basis === BEICHEN_BALANCE_BASIS ? BEICHEN_BALANCE_BASIS : ''
+  const tooOld = prevBasis === '' || prevAt === 0 || at - prevAt > STALE_MS || prevDate !== date
   const delta = prevTotal === null || tooOld ? 0 : prevTotal - balance
-  writeJson(beichenLastFile(), { at, date, total: balance })
+  writeJson(beichenLastFile(), { at, date, total: balance, basis: BEICHEN_BALANCE_BASIS })
   // 接口已经给出当天账单行时以接口为准，不再用余额差重复计。
   if (hasTodayRow || delta <= 0) return hasTodayRow ? null : 0
   return round2(delta)
@@ -1078,7 +1084,9 @@ async function fetchBeichen() {
     if (errors.length === keys.length) {
       return { configured: true, ok: false, error: errors[0] ?? 'empty', balance: null, unit: 'USD', today: null, days }
     }
-    const balanceOnly = round2(balances.reduce((sum, n) => sum + n, 0))
+    // 余额是账户级口径：同一账户下每个分组的 Key 查到的都是同一个钱包余额，
+    // 相加会把剩余金额放大成组数倍，所以取各分组读数的最大值。
+    const balanceOnly = balances.length === 0 ? 0 : round2(Math.max(...balances))
     const onlyBalanced = commitBeichenBalance(balanceOnly, false)
     const todayOnly = typeof onlyBalanced === 'number' && onlyBalanced > 0
       ? { date: new Date().toLocaleDateString('sv-SE'), requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, cost: 0, actualCost: onlyBalanced }
@@ -1113,7 +1121,8 @@ async function fetchBeichen() {
 
   const todayKey = new Date().toLocaleDateString('sv-SE')
   // 当天没有账单行时，用两轮合计余额的差额补一段；接口补上当天行后自动停用。
-  const balanceSum = balances.reduce((sum, n) => sum + n, 0)
+  // 见上：各分组共用同一个钱包余额，取最大值而不是求和。
+  const balanceSum = balances.length === 0 ? 0 : round2(Math.max(...balances))
   const hasTodayRow = mergedDays.some(row => row.date === todayKey)
   const balanced = commitBeichenBalance(balanceSum, hasTodayRow)
   // 当天的量可能来自接口账单行，也可能是前几轮用余额差补的，两者都要累计在同一处：
