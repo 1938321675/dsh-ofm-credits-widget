@@ -819,17 +819,46 @@ function beichenFile() {
   return path.join(ledgerDir(), 'beichen-days.json')
 }
 
-/** Key 解析：环境变量优先，其次 `~/.dsh/.credentials.yaml` 里的同名条目。 */
-function readBeichenKey() {
-  const env = process.env.BEICHEN_MAIN_API_KEY
-  if (typeof env === 'string' && env.trim() !== '') return env.trim()
+/**
+ * 解析全部北辰 API Key（支持多分组）。
+ *
+ * 北辰一个分组一个 Key，网关的 `/v1/usage` 只认当前 Key 名下的账，所以要把每个
+ * 分组的 Key 都取一遍再合并。解析顺序与去重：
+ *   1. 环境变量 `BEICHEN_API_KEYS`——逗号或换行分隔的键列表（多分组主入口）；
+ *   2. 环境变量 `BEICHEN_MAIN_API_KEY`——单键（保留原约定）；
+ *   3. `~/.dsh/.credentials.yaml` 里的 `BEICHEN_API_KEYS` 与 `BEICHEN_MAIN_API_KEY`。
+ * 空串与重复项会被丢掉。
+ */
+function readBeichenKeys() {
+  const keys = []
+  const push = (raw) => {
+    if (raw === null || raw === undefined) return
+    // YAML 列表项的 `- ` 标记折掉，换行折成逗号，再按逗号/空白切分并去引号括号。
+    const text = String(raw)
+      .replace(/(^|[\s,])-\s+/g, '$1')
+      .replace(/\n\s*/g, ',')
+    for (const part of text.split(/[\s,]+/)) {
+      const key = part.replace(/['"\[\]]/g, '').trim()
+      if (key !== '' && !keys.includes(key)) keys.push(key)
+    }
+  }
+  const envList = process.env.BEICHEN_API_KEYS
+  if (typeof envList === 'string' && envList.trim() !== '') push(envList)
+  const envMain = process.env.BEICHEN_MAIN_API_KEY
+  if (typeof envMain === 'string' && envMain.trim() !== '') push(envMain)
   try {
     const text = readFileSync(path.join(DSH_HOME, '.credentials.yaml'), 'utf8')
-    const match = text.match(/^\s*BEICHEN_MAIN_API_KEY\s*:\s*['\"]?([^'\"\s#]+)/m)
-    return match === null ? '' : match[1].trim()
-  } catch {
-    return ''
-  }
+    const listMatch = text.match(/^\s*BEICHEN_API_KEYS\s*:\s*(.*(?:\n[ \t]+.*)*)/m)
+    if (listMatch !== null) push(listMatch[1])
+    const mainMatch = text.match(/^\s*BEICHEN_MAIN_API_KEY\s*:\s*['\"]?([^'\"\s#]+)/m)
+    if (mainMatch !== null) push(mainMatch[1])
+  } catch { /* 没有凭据文件时只看环境变量 */ }
+  return keys
+}
+
+/** 兼容旧调用：返回第一个可用 Key，没有则为空串。 */
+function readBeichenKey() {
+  return readBeichenKeys()[0] ?? ''
 }
 
 function readBeichenDays() {
@@ -901,59 +930,136 @@ function normalizeBeichenDay(row) {
   }
 }
 
-async function fetchBeichen() {
-  const key = readBeichenKey()
-  const days = Object.values(readBeichenDays().days).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
-  if (key === '') return { configured: false, ok: false, error: 'no-key', balance: null, unit: 'USD', today: null, days }
+/**
+ * 把多个分组的按日行按日期相加：同一天的 requests、三桶 token 与成本合成一条。
+ * 入参是已归一过的天行；接口给的是当天累计，合并结果直接覆盖历史，不与历史叠加。
+ */
+function mergeBeichenDays(rows) {
+  const byDate = new Map()
+  for (const row of Array.isArray(rows) ? rows : []) {
+    // 入参是已归一过的天行（驼峰字段），这里只做同日期相加，不能再归一一次，
+    // 否则驼峰字段会被当成接口原始字段而全部归零。
+    if (row === null || typeof row !== 'object') continue
+    const date = typeof row.date === 'string' ? row.date.trim() : ''
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue
+    const prev = byDate.get(date)
+    if (prev === undefined) { byDate.set(date, { ...row, date }); continue }
+    for (const field of ['requests', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens', 'cost', 'actualCost']) prev[field] += row[field]
+  }
+  return [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+}
+
+/**
+ * 把多个分组的按模型明细按模型名相加。model_stats 是累计口径、接口不分日，
+ * 跨分组的同名模型合成一条，供分区里的模型明细展示。
+ */
+function mergeBeichenModels(rows) {
+  const byModel = new Map()
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const model = typeof row?.model === 'string' ? row.model.trim() : ''
+    if (model === '') continue
+    const next = {
+      requests: countOf(row?.requests),
+      inputTokens: countOf(row?.input_tokens),
+      outputTokens: countOf(row?.output_tokens),
+      cacheReadTokens: countOf(row?.cache_read_tokens),
+      totalTokens: countOf(row?.total_tokens),
+      actualCost: countOf(row?.actual_cost),
+    }
+    const prev = byModel.get(model)
+    if (prev === undefined) { byModel.set(model, { model, ...next }); continue }
+    for (const field of Object.keys(next)) prev[field] += next[field]
+  }
+  return [...byModel.values()].sort((a, b) => b.totalTokens - a.totalTokens)
+}
+
+/** 用单个 Key 取一次北辰读数，返回原始响应或错误原因。 */
+async function fetchBeichenKey(key) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), BEICHEN_TIMEOUT_MS)
-  let response
   try {
-    response = await fetch(BEICHEN_USAGE_URL, {
+    const response = await fetch(BEICHEN_USAGE_URL, {
       headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' },
       signal: controller.signal,
     })
+    if (!response.ok) return { ok: false, error: 'HTTP ' + response.status }
+    return { ok: true, body: await response.json() }
   } catch (error) {
     const reason = error?.name === 'AbortError' ? 'timeout' : String(error?.message ?? error)
-    return { configured: true, ok: false, error: reason, balance: null, unit: 'USD', today: null, days }
+    return { ok: false, error: reason }
   } finally {
     clearTimeout(timer)
   }
-  if (!response.ok) return { configured: true, ok: false, error: 'HTTP ' + response.status, balance: null, unit: 'USD', today: null, days }
-  let body
-  try {
-    body = await response.json()
-  } catch (error) {
-    return { configured: true, ok: false, error: String(error?.message ?? error), balance: null, unit: 'USD', today: null, days }
+}
+
+/**
+ * 逐个分组取数并合并。
+ *
+ * 北辰一个分组一个 API Key，网关的 `/v1/usage` 只认当前 Key 名下的账；之前只解析
+ * 一个 Key，多分组时就只有其中一个进了当日消耗。这里对每个 Key 各取一次，再按日期
+ * 与模型名把各分组的量相加：日期行覆盖写入历史（接口给的是当天累计，不叠加，避免
+ * 重复计数），模型明细是累计口径，跨分组同样相加。
+ *
+ * 单个分组取数失败只记下原因，不拖垮其它分组；全部失败才返回 ok:false。
+ */
+async function fetchBeichen() {
+  const keys = readBeichenKeys()
+  const stored = readBeichenDays()
+  const days = Object.values(stored.days).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+  const empty = { configured: false, ok: false, error: 'no-key', balance: null, unit: 'USD', today: null, days }
+  if (keys.length === 0) return empty
+
+  const dayRows = []
+  const modelRows = []
+  const balances = []
+  const errors = []
+  let plan = ''
+  let mode = ''
+  for (const key of keys) {
+    const result = await fetchBeichenKey(key)
+    if (result.ok !== true) { errors.push(result.error); continue }
+    const body = result.body
+    for (const row of Array.isArray(body?.daily_usage) ? body.daily_usage : []) {
+      const day = normalizeBeichenDay(row)
+      if (day !== null) dayRows.push(day)
+    }
+    for (const row of Array.isArray(body?.model_stats) ? body.model_stats : []) modelRows.push(row)
+    balances.push(countOf(body?.balance ?? body?.remaining))
+    if (plan === '' && typeof body?.planName === 'string') plan = body.planName
+    if (mode === '' && typeof body?.mode === 'string') mode = body.mode
   }
-  // 每日行写进历史：接口给的是当天累计，按日期覆盖即最新值。
+
+  if (dayRows.length === 0 && modelRows.length === 0) {
+    return { configured: true, ok: false, error: errors[0] ?? 'empty', balance: null, unit: 'USD', today: null, days }
+  }
+
+  const mergedDays = mergeBeichenDays(dayRows)
+  const models = mergeBeichenModels(modelRows)
+
+  // 每日行写进历史：接口给的是当天累计，按日期覆盖即最新值；跨分组的量已在
+  // mergeBeichenDays 里相加，这里不与历史叠加，避免把同一天记两遍。
   const state = readBeichenDays()
-  for (const row of Array.isArray(body?.daily_usage) ? body.daily_usage : []) {
-    const day = normalizeBeichenDay(row)
-    if (day !== null) state.days[day.date] = day
-  }
+  for (const day of mergedDays) state.days[day.date] = day
   const floor = new Date(Date.now() - BEICHEN_KEEP_DAYS * 86_400_000)
   const pad = n => String(n).padStart(2, '0')
   const cutoff = String(floor.getFullYear()) + '-' + pad(floor.getMonth() + 1) + '-' + pad(floor.getDate())
   for (const key2 of Object.keys(state.days)) if (key2 < cutoff) delete state.days[key2]
   writeBeichenDays(state)
-  // 按模型明细（model_stats）是「累计」口径，接口不分日：它对应 usage.total，
-  // 与上面的 daily_usage 不是一回事。这里照原样带回，由界面标注清楚，
-  // 不混进某一天的统计里。
-  const models = normalizeBeichenModels(body?.model_stats)
-  const merged = Object.values(state.days).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+
   const todayKey = new Date().toLocaleDateString('sv-SE')
-  const today = merged.find(row => row.date === todayKey) ?? null
+  const today = mergedDays.find(row => row.date === todayKey) ?? null
   return {
     configured: true,
     ok: true,
-    balance: countOf(body?.balance ?? body?.remaining),
+    balance: balances.reduce((sum, n) => sum + n, 0),
     unit: 'USD',
-    plan: typeof body?.planName === 'string' ? body.planName : '',
-    mode: typeof body?.mode === 'string' ? body.mode : '',
+    plan,
+    mode,
     today,
-    days: merged,
+    days: mergedDays,
     models,
+    keyCount: keys.length,
+    errors,
   }
 }
 
@@ -1263,7 +1369,8 @@ export const __test = {
   commitReadings, readLedger, normalizeLast, todayKey, round2, ledgerDir,
   wbKey, readWorkBuddyLedger, commitWorkBuddy, WB_STALE_MS, WB_RESAVE_MS, RESAVE_MS, STALE_MS,
   readUsageStats, usageLedgerFile, OFM_PROVIDERS, WORKBUDDY_PROVIDERS, usageCache,
-  fetchBeichen, readBeichen, readBeichenKey, beichenFile, normalizeBeichenModels,
+  fetchBeichen, fetchBeichenKey, readBeichen, readBeichenKeys, readBeichenKey,
+  beichenFile, normalizeBeichenModels, mergeBeichenDays, mergeBeichenModels,
   readCodexQuota, readOfmTokenUsage,
   recordTokenUsage, readLocalTokenUsage, tokensFile, bucketsOf,
   backfillTodayFromSessionLogs, listSessionLogs, decompressSessionLog, CODEX_PROVIDERS,

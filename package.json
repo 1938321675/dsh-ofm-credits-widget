@@ -24,7 +24,7 @@
     "routetest.mjs"
   ],
   "scripts": {
-    "test": "node selftest.cjs && node rendertest.cjs && node ledgertest.mjs && node routetest.mjs"
+    "test": "node selftest.cjs && node rendertest.cjs && node ledgertest.mjs && node routetest.mjs && node beichentest.mjs"
   },
   "dsh": {
     "bundle": {

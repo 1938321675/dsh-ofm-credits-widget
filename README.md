@@ -114,8 +114,13 @@
 ### 北辰 API 读数
 
 北辰是中转网关，余额与用量都在网关的只读接口 `GET /v1/usage` 上：网页 `/usage` 走登录态，
-这条接口接受 API Key，Host 侧用 `Authorization: Bearer` 直接取。Key 的解析顺序是环境变量
-`BEICHEN_MAIN_API_KEY`、`~/.dsh/.credentials.yaml` 里的同名条目。
+这条接口接受 API Key，Host 侧用 `Authorization: Bearer` 直接取。北辰一个分组一个 Key，
+网关只认当前 Key 名下的账，所以插件会按分组逐个取数再合并，不会只算其中一个分组。
+
+Key 的解析顺序（去重、空项忽略）：环境变量 `BEICHEN_API_KEYS`（逗号或换行分隔的多分组
+列表）、环境变量 `BEICHEN_MAIN_API_KEY`、`~/.dsh/.credentials.yaml` 里的 `BEICHEN_API_KEYS`
+与 `BEICHEN_MAIN_API_KEY` 同名条目。多分组时每个 Key 各取一次，当天与按模型明细按日期、
+模型名相加，余额求和；单个分组取数失败只记下原因，不影响其它分组，全部失败才显示取数失败。
 
 请求带 60 秒缓存与并发去重，页面每分钟轮询不会把上游打成压力测试。每次成功取数把当天
 汇总并进 `beichen-days.json`，保留 90 天。这条接口按天返回，多天趋势由此逐日累积：接入
