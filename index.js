@@ -29,8 +29,8 @@
  * @module dsh-ofm-credit-watch
  */
 
-import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 
@@ -812,6 +812,173 @@ const BEICHEN_USAGE_URL = 'https://api.beichenapi.com/v1/usage'
 const BEICHEN_CACHE_MS = 60_000
 const BEICHEN_KEEP_DAYS = 90
 const BEICHEN_TIMEOUT_MS = 15_000
+/** 连接类失败的额外重试次数：境外网关偶发握手卡死，重试一次即可盖住抖动。 */
+const BEICHEN_RETRIES = 2
+
+/**
+ * 北辰的实时统计接口（网页 /usage 用的那套）。
+ *
+ * `GET /v1/usage` 的按日汇总要等结算后才落当天那行，盘中查不到今天的量；
+ * 网页的今日数字来自这条登录态接口，它读的是按小时聚合表，调用完就能看到。
+ * 这条接口只认登录令牌，API Key 会被判 INVALID_TOKEN。
+ */
+const BEICHEN_STATS_URL = 'https://beichenapi.com/api/v1/usage/stats?period=today'
+const BEICHEN_DASHBOARD_URL = 'https://beichenapi.com/api/v1/usage/dashboard/stats'
+const BEICHEN_STATS_TIMEOUT_MS = 12_000
+
+/**
+ * 从浏览器 localStorage 里找北辰的登录令牌。
+ *
+ * 本地开发插件不引入浏览器自动化：它要额外装几百 MB 内核，而且 Cloudflare 会把
+ * 自动化浏览器拦在登录页。这里改成直接读已经登录过的浏览器数据目录——Edge 与
+ * Chrome 的 Local Storage 都是 leveldb，键是 `_https://beichenapi.com\0\1auth_token`，
+ * 值是 `\1` 前缀加 JWT。只在内存里取用，不落盘。
+ */
+function readBeichenTokensSync() {
+  const roots = [
+    process.env.BEICHEN_BROWSER_DATA,
+    path.join(homedir(), 'AppData/Local/Microsoft/Edge/User Data'),
+    path.join(homedir(), 'AppData/Local/Google/Chrome/User Data'),
+  ].filter(item => typeof item === 'string' && item !== '')
+  const tokens = []
+  for (const root of roots) {
+    for (const profile of ['Default', 'Profile 1', 'Profile 2']) {
+      const dir = path.join(root, profile, 'Local Storage', 'leveldb')
+      // 浏览器运行时会独占 LOCK、并在退出时重写 ldb；复制一份出来读，跳过 LOCK。
+      let names
+      try { names = readdirSync(dir) } catch { continue }
+      // leveldb 的块做了前缀压缩，`auth_token` 这个键名在文件里不一定是连续明文，
+      // 但值（JWT）是完整存的。所以按文件扫：只在出现 beichenapi 的文件里找三段式
+      // base64url，取到的令牌再交给调用方用统计接口验证真伪。
+      for (const name of names) {
+        if (name === 'LOCK' || (!name.endsWith('.ldb') && !name.endsWith('.log'))) continue
+        let buffer
+        try { buffer = readFileSync(path.join(dir, name)) } catch { continue /* 正在被改写 */ }
+        const text = buffer.toString('latin1')
+        if (!text.includes('beichenapi.com')) continue
+        // 同一个库里可能留着别的站点、以及过期的旧 JWT（实测扫出过 211 字节的失效
+        // 串）。auth_token 的真实值是最长的那条——它是完整签名令牌，旧的通常更短。
+        // 取到后由调用方用统计接口验活，失效的自然被跳过。
+        const pattern = /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/g
+        const found = text.match(pattern)
+        if (found === null) continue
+        for (const jwt of found) if (!tokens.includes(jwt)) tokens.push(jwt)
+      }
+    }
+  }
+  // 长的排前面：真实令牌比历史残留更长，验活时先试它。
+  return tokens.sort((a, b) => b.length - a.length)
+}
+
+/**
+ * 用 leveldb 解析库精确取 auth_token。
+ *
+ * 文件级扫描只能拿到库里所有三段式 JWT 串，其中包括历史上过期的那条（实测扫到
+ * 211 字节的失效串，真实令牌是 384 字节）。精确取值必须解块结构，交给 leveldb
+ * 自己的解析器最稳。这个依赖是可选的：没装时回落到扫描，仍然能工作，只是可能
+ * 先拿到旧串——验活失败的会被跳过，所以不影响正确性。
+ */
+async function readBeichenTokensExact(dir) {
+  let ClassicLevel
+  try {
+    ({ ClassicLevel } = await import('classic-level'))
+  } catch {
+    return []
+  }
+  const copy = path.join(tmpdir(), 'ofm-beichen-ls-' + process.pid + '-' + Date.now())
+  try {
+    mkdirSync(copy, { recursive: true })
+    for (const name of readdirSync(dir)) {
+      if (name === 'LOCK') continue
+      try { copyFileSync(path.join(dir, name), path.join(copy, name)) } catch { /* 正在被改写 */ }
+    }
+    const db = new ClassicLevel(copy, { keyEncoding: 'buffer', valueEncoding: 'buffer' })
+    await db.open()
+    const tokens = []
+    try {
+      for await (const [key, value] of db.iterator()) {
+        if (!key.toString('utf8').endsWith('auth_token')) continue
+        if (!key.toString('utf8').includes('beichenapi.com')) continue
+        const raw = value.toString('utf8').replace(/^[\u0000-\u0002]/, '').trim()
+        if (raw !== '') tokens.push(raw)
+      }
+    } finally {
+      await db.close()
+    }
+    return tokens
+  } catch {
+    return []
+  } finally {
+    try { rmSync(copy, { recursive: true, force: true }) } catch { /* 清理失败无所谓 */ }
+  }
+}
+
+/** 用登录令牌取今日统计；令牌缺失或失效返回 { ok:false }。 */
+async function fetchBeichenStats(token) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), BEICHEN_STATS_TIMEOUT_MS)
+  try {
+    const response = await fetch(BEICHEN_STATS_URL, {
+      headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' },
+      signal: controller.signal,
+    })
+    if (!response.ok) return { ok: false, error: 'HTTP ' + response.status }
+    const payload = await response.json()
+    const data = payload?.data
+    if (data === null || typeof data !== 'object') return { ok: false, error: 'empty-payload' }
+    return {
+      ok: true,
+      requests: countOf(data.total_requests),
+      inputTokens: countOf(data.total_input_tokens),
+      outputTokens: countOf(data.total_output_tokens),
+      cacheReadTokens: countOf(data.total_cache_read_tokens),
+      cacheWriteTokens: countOf(data.total_cache_creation_tokens),
+      totalTokens: countOf(data.total_tokens),
+      cost: countOf(data.total_cost),
+      actualCost: countOf(data.total_actual_cost),
+    }
+  } catch (error) {
+    const reason = error?.name === 'AbortError' ? 'timeout' : String(error?.message ?? error)
+    return { ok: false, error: reason }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * 取今日统计：优先用登录态接口的实时值。
+ *
+ * 实时接口拿到的是「今天到现在」的精确量，正好补上 /v1/usage 盘中缺的当天那行；
+ * 拿不到（浏览器没登录、令牌过期）时回落到余额差，保持原有行为。
+ */
+async function readBeichenTokens() {
+  const roots = [
+    process.env.BEICHEN_BROWSER_DATA,
+    path.join(homedir(), 'AppData/Local/Microsoft/Edge/User Data'),
+    path.join(homedir(), 'AppData/Local/Google/Chrome/User Data'),
+  ].filter(item => typeof item === 'string' && item !== '')
+  const exact = []
+  for (const root of roots) {
+    for (const profile of ['Default', 'Profile 1', 'Profile 2']) {
+      const dir = path.join(root, profile, 'Local Storage', 'leveldb')
+      exact.push(...await readBeichenTokensExact(dir))
+    }
+  }
+  const scanned = readBeichenTokensSync()
+  // 精确解析排前面；扫描结果作为补充（依赖没装时只有它）。
+  const all = [...exact, ...scanned].filter(item => item !== '')
+  return [...new Set(all)].sort((a, b) => b.length - a.length)
+}
+
+async function readBeichenTodayStats() {
+  const tokens = await readBeichenTokens()
+  if (tokens.length === 0) return null
+  for (const token of tokens) {
+    const stats = await fetchBeichenStats(token)
+    if (stats.ok === true) return stats
+  }
+  return null
+}
 let beichenCache = null
 let beichenInFlight = null
 
@@ -1011,8 +1178,14 @@ function mergeBeichenModels(rows) {
   return [...byModel.values()].sort((a, b) => b.totalTokens - a.totalTokens)
 }
 
-/** 用单个 Key 取一次北辰读数，返回原始响应或错误原因。 */
-async function fetchBeichenKey(key) {
+/**
+ * 用单个 Key 取一次北辰读数，返回原始响应或错误原因。
+ *
+ * 网关在境外（实测握手 0.2~7 秒，偶发连接卡死到超时），一次失败就判失败会让
+ * 整栏在「有数」和「取数失败」之间闪。连接类失败重试一次即可覆盖大部分抖动；
+ * HTTP 状态码是上游明确答复，不重试。
+ */
+async function fetchBeichenKey(key, attempt = 0) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), BEICHEN_TIMEOUT_MS)
   try {
@@ -1024,6 +1197,11 @@ async function fetchBeichenKey(key) {
     return { ok: true, body: await response.json() }
   } catch (error) {
     const reason = error?.name === 'AbortError' ? 'timeout' : String(error?.message ?? error)
+    if (attempt < BEICHEN_RETRIES) {
+      // 分组越多，单个 Key 撞上卡死的概率越高，退一步再试比直接判失败稳。
+      await new Promise(resolve => setTimeout(resolve, 400))
+      return fetchBeichenKey(key, attempt + 1)
+    }
     return { ok: false, error: reason }
   } finally {
     clearTimeout(timer)
@@ -1125,11 +1303,16 @@ async function fetchBeichen() {
   const balanceSum = balances.length === 0 ? 0 : round2(Math.max(...balances))
   const hasTodayRow = mergedDays.some(row => row.date === todayKey)
   const balanced = commitBeichenBalance(balanceSum, hasTodayRow)
-  // 当天的量可能来自接口账单行，也可能是前几轮用余额差补的，两者都要累计在同一处：
-  // 接口给了当天行就以它为准（覆盖补记），没给就保留账本里已累积的余额差。
+  // 登录态实时统计优先：它读按小时聚合表，调用完就能看到今天到现在为止的精确
+  // 请求数、三桶 token 与金额，正好补上 /v1/usage 盘中缺的当天那行。拿不到时
+  // （浏览器没登录、令牌过期）才回落到余额差估算。
+  const liveToday = await readBeichenTodayStats()
   const storedToday = state.days[todayKey] ?? null
   let today = mergedDays.find(row => row.date === todayKey) ?? null
-  if (today === null && typeof balanced === 'number' && balanced > 0) {
+  if (liveToday !== null) {
+    today = { date: todayKey, requests: liveToday.requests, inputTokens: liveToday.inputTokens, outputTokens: liveToday.outputTokens, cacheReadTokens: liveToday.cacheReadTokens, cacheWriteTokens: liveToday.cacheWriteTokens, totalTokens: liveToday.totalTokens, cost: liveToday.cost, actualCost: liveToday.actualCost }
+    state.days[todayKey] = today
+  } else if (today === null && typeof balanced === 'number' && balanced > 0) {
     const accumulated = round2((Number.isFinite(storedToday?.actualCost) ? storedToday.actualCost : 0) + balanced)
     today = { date: todayKey, requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, cost: 0, actualCost: accumulated }
     state.days[todayKey] = today
@@ -1139,6 +1322,8 @@ async function fetchBeichen() {
   // 上面的 state 在第 1112 行已经落过盘，补记的当天行是之后才加进去的，必须再写一次，
   // 否则下一轮读回账本时找不到它，界面就会在「有今天」和「没有今天」之间反复闪。
   if (today !== null && state.days[todayKey] !== undefined) writeBeichenDays(state)
+  // live 标记告诉界面这一天用的是实时统计，不是结算后的账单行。
+  const todayLive = liveToday !== null
   // 返回的天数一律以账本为准：接口行与余额差补记混在同一份里，界面翻日期条才不会
   // 出现「刚显示过今天有消耗、下一轮又变空」。
   const allDays = Object.values(state.days).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
@@ -1150,6 +1335,7 @@ async function fetchBeichen() {
     plan,
     mode,
     today,
+    todayLive,
     days: allDays,
     models,
     keyCount: keys.length,
@@ -1464,6 +1650,7 @@ export const __test = {
   wbKey, readWorkBuddyLedger, commitWorkBuddy, WB_STALE_MS, WB_RESAVE_MS, RESAVE_MS, STALE_MS,
   readUsageStats, usageLedgerFile, OFM_PROVIDERS, WORKBUDDY_PROVIDERS, usageCache,
   fetchBeichen, fetchBeichenKey, readBeichen, readBeichenKeys, readBeichenKey,
+  readBeichenTokens, readBeichenTokensSync, fetchBeichenStats, readBeichenTodayStats,
   beichenFile, normalizeBeichenModels, mergeBeichenDays, mergeBeichenModels,
   readCodexQuota, readOfmTokenUsage,
   recordTokenUsage, readLocalTokenUsage, tokensFile, bucketsOf,

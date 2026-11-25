@@ -23,6 +23,9 @@
     "ledgertest.mjs",
     "routetest.mjs"
   ],
+  "optionalDependencies": {
+    "classic-level": "^3.0.0"
+  },
   "scripts": {
     "test": "node selftest.cjs && node rendertest.cjs && node ledgertest.mjs && node routetest.mjs && node beichentest.mjs"
   },
@@ -37,5 +40,8 @@
         "@deepseek-ai/dsh-client-connection"
       ]
     }
+  },
+  "dependencies": {
+    "classic-level": "^3.0.0"
   }
 }

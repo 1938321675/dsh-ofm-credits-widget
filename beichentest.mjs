@@ -245,6 +245,30 @@ async function main() {
     }
   }
 
+  // ── 登录态实时统计：字段归一与失败处理 ─────────────────────────────────
+  {
+    const realFetch2 = globalThis.fetch
+    globalThis.fetch = async () => ({
+      ok: true, status: 200,
+      json: async () => ({ data: { total_requests: 187, total_input_tokens: 2645006, total_output_tokens: 80509, total_cache_read_tokens: 38274816, total_cache_creation_tokens: 0, total_tokens: 41000331, total_cost: 9.9225836, total_actual_cost: 2.354593232 } }),
+    })
+    try {
+      const s = await t.fetchBeichenStats('fake')
+      check('实时统计 requests 归一', s.requests, 187)
+      check('实时统计三桶 token 归一', [s.inputTokens, s.outputTokens, s.cacheReadTokens], [2645006, 80509, 38274816])
+      check('实时统计 actualCost 归一', s.actualCost, 2.354593232)
+    } finally { globalThis.fetch = realFetch2 }
+  }
+  {
+    const realFetch3 = globalThis.fetch
+    globalThis.fetch = async () => ({ ok: false, status: 401, json: async () => ({}) })
+    try {
+      const s = await t.fetchBeichenStats('expired')
+      check('令牌失效时 ok 为 false', s.ok, false)
+      check('令牌失效带回 HTTP 状态', s.error, 'HTTP 401')
+    } finally { globalThis.fetch = realFetch3 }
+  }
+
   if (failures.length > 0) {
     console.error(`✗ ${failures.length}/${checks} 项失败`)
     for (const line of failures) console.error('  - ' + line)
