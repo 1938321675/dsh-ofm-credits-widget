@@ -191,7 +191,7 @@ const IDX = {
   // 视图与 token 用量：接在 WorkBuddy 之后。
   view: 20, usage: 21, usageDate: 22, statsSplit: 23, mainSplit: 24,
   // 北辰 API 及后续大栏：声明在所有 useState 之后，下标依次排开。
-  beichen: 25, codex: 26, ofmTokens: 27, hiddenSections: 28, codexOpen: 29, beichenOpen: 30, ofmOpen: 31,
+  beichen: 25, codex: 26, ofmTokens: 27, agy: 28, hiddenSections: 29, codexOpen: 30, beichenOpen: 31, ofmOpen: 32, agyOpen: 33, claudeOpen: 34,
 }
 
 /** WorkBuddy 分区节点。 */
@@ -296,10 +296,10 @@ check('隐藏 WorkBuddy 栏后分区不渲染',
 // ── 大栏开关：真正调用一次 onChange，确认状态翻转链路通 ──────────────
 // 只检查「有 onChange」不够：上一版把 persist 函数放在组件外引用了
 // 不存在的 setter，渲染树完全正常，点下去才抛 ReferenceError。
-check('四个大栏开关都是可点的按钮', (() => {
+check('六个大栏开关都是可点的按钮', (() => {
   const tree = render({ [IDX.configOpen]: true, [IDX.hiddenSections]: new Set() })
   const buttons = flatten(tree).filter(n => n.props !== undefined && n.props['data-section'] !== undefined)
-  return buttons.length === 4 && buttons.every(b => b.type === 'button' && typeof b.props.onClick === 'function')
+  return buttons.length === 6 && buttons.every(b => b.type === 'button' && typeof b.props.onClick === 'function')
 })(), true)
 
 check('点击大栏开关写入隐藏集合并使分区消失', (() => {
@@ -413,6 +413,76 @@ check('收起时不显示配置面板',
   })
   check('OFM 渠道全隐藏时 WorkingBuddy 行仍在', countWbRows(allHiddenOfm), 3)
 }
+
+// ── 4b2. Gemini / Claude 订阅分区 ────────────────────────────────────────
+{
+  const agyReading = {
+    available: true, activeId: 'acc_a', stale: false, sampledAt: Date.now() - 60_000, ageMs: 60_000,
+    accounts: [
+      {
+        id: 'acc_a', alias: 'primary', email: 'a@example.com', planTier: 'pro',
+        families: [
+          { family: 'google', label: 'Gemini', fiveHour: 80, fiveHourResetsAt: Date.now() + 3_600_000, weekly: 95, weeklyResetsAt: Date.now() + 86_400_000, updatedAt: Date.now() },
+          { family: 'anthropic', label: 'Claude', fiveHour: 98, fiveHourResetsAt: Date.now() + 3_600_000, weekly: 99, weeklyResetsAt: Date.now() + 86_400_000, updatedAt: Date.now() },
+          { family: 'openai', label: 'GPT-OSS', fiveHour: 98, fiveHourResetsAt: Date.now() + 3_600_000, weekly: 99, weeklyResetsAt: Date.now() + 86_400_000, updatedAt: Date.now() },
+        ],
+      },
+      {
+        id: 'acc_b', alias: 'backup', email: 'b@example.com', planTier: 'free',
+        families: [
+          { family: 'google', label: 'Gemini', fiveHour: null, fiveHourResetsAt: null, weekly: 42, weeklyResetsAt: Date.now() + 86_400_000, updatedAt: Date.now() },
+        ],
+      },
+    ],
+  }
+  const agyOf = tree => flatten(tree).find(node => node.props !== undefined && node.props['data-ofm-credit-watch-agy'] !== undefined)
+  const claudeOf = tree => flatten(tree).find(node => node.props !== undefined && node.props['data-ofm-credit-watch-claude'] !== undefined)
+  const countAgyAccounts = tree => flatten(tree).filter(node => node.props !== undefined && node.props['data-agy-account'] !== undefined).length
+
+  // 两个大栏各自独立出现。
+  check('Gemini 读数到达后出现 Gemini 分区',
+    agyOf(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.agy]: agyReading }))?.props['data-ofm-credit-watch-agy'], 'section')
+  check('Gemini 读数到达后出现 Claude 分区',
+    claudeOf(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.agy]: agyReading }))?.props['data-ofm-credit-watch-claude'], 'section')
+  // 没装 agy-link 时两栏都不出现。
+  const none = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set() })
+  check('没装 agy-link 时不渲染 Gemini 分区', agyOf(none), undefined)
+  check('没装 agy-link 时不渲染 Claude 分区', claudeOf(none), undefined)
+
+  // 折叠时两栏都只有胶囊，没有账号行。
+  const collapsed = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.agy]: agyReading })
+  check('折叠时不出账号行', countAgyAccounts(collapsed), 0)
+  // 展开：两栏各自列出两个账号。
+  const expanded = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.agy]: agyReading, [IDX.agyOpen]: true, [IDX.claudeOpen]: true })
+  check('展开后两个分区都按账号列出', countAgyAccounts(expanded), 4)
+
+  // 两个池子互不串门：Gemini 栏的胶囊是 80%，Claude 栏的是 98%。
+  const geminiChips = flattened => flattened
+    .filter(n => n.props !== undefined && n.props['data-ofm-credit-watch-agy'] === 'section')
+  const textOf = node => allText(node).join(' ')
+  const geminiTree = flatten(expanded).find(n => n.props && n.props['data-ofm-credit-watch-agy'] === 'section')
+  const claudeTree = flatten(expanded).find(n => n.props && n.props['data-ofm-credit-watch-claude'] === 'section')
+  check('Gemini 分区显示 Gemini 的余量', textOf(geminiTree).includes('80%'), true)
+  check('Gemini 分区不显示 Claude 的余量', textOf(geminiTree).includes('98%'), false)
+  check('Claude 分区显示 Claude 的余量', textOf(claudeTree).includes('98%'), true)
+
+  // 开关各自生效。
+  check('勾掉 Gemini 不影响 Claude 分区',
+    (() => {
+      const tree = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.agy]: agyReading, [IDX.hiddenSections]: new Set(['agy']) })
+      return agyOf(tree) === undefined && claudeOf(tree) !== undefined
+    })(), true)
+  check('勾掉 Claude 不影响 Gemini 分区',
+    (() => {
+      const tree = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.agy]: agyReading, [IDX.hiddenSections]: new Set(['claude']) })
+      return claudeOf(tree) === undefined && agyOf(tree) !== undefined
+    })(), true)
+
+  // 快照过期时两栏都退为提示，不显示旧百分比。
+  const stale = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.agy]: { ...agyReading, stale: true } })
+  check('快照过期时仍渲染两个分区', agyOf(stale) !== undefined && claudeOf(stale) !== undefined, true)
+}
+
 
 // ── 4c. 统计界面 ──────────────────────────────────────────────────────────
 {

@@ -66,6 +66,10 @@ window.__ModuleLoader__.load({
     const CODEX_OPEN_KEY = 'ofm-credit-watch.codexOpen'
     /** OFM 模型分区的折叠状态持久化键。 */
     const OFM_OPEN_KEY = 'ofm-credit-watch.ofmOpen'
+    /** Gemini 订阅分区的折叠状态持久化键。 */
+    const AGY_OPEN_KEY = 'ofm-credit-watch.agyOpen'
+    /** Claude 订阅分区的折叠状态持久化键。 */
+    const CLAUDE_OPEN_KEY = 'ofm-credit-watch.claudeOpen'
     /** 折叠状态持久化键。 */
     const COLLAPSE_KEY = 'ofm-credit-watch.collapsed'
     /** 被用户隐藏的渠道 id 列表持久化键。存「隐藏」而不是「显示」：
@@ -85,6 +89,8 @@ window.__ModuleLoader__.load({
     const CODEX_URL = '/api/ofm-credit-watch/codex'
     /** OFM 免费模型的今日 token：读 cost-meter 账本。 */
     const OFM_TOKENS_URL = '/api/ofm-credit-watch/ofm-tokens'
+    /** Gemini 订阅限额：读 agy-link 落盘的账号池快照。 */
+    const AGY_URL = '/api/ofm-credit-watch/agy'
     /** 当前视图（列表 / 统计）持久化键。 */
     const VIEW_KEY = 'ofm-credit-watch.view'
     /** 统计界面一屏放几天。 */
@@ -274,16 +280,36 @@ window.__ModuleLoader__.load({
         codexWhenDate: '{month}月{day}日 {time}',
         codexChipFiveHour: '5h',
         codexChipWeekly: '1w',
-        codexStale: '快照已过期，等订阅插件刷新',
+        codexStale: '窗口已重置，等订阅插件刷新',
+        codexAgedTip: '　读数来自 {when} 的采样，窗口尚未重置，余量仍有效',
         codexTipStale: '　快照停在上次采样，等订阅插件刷新后再看',
         codexTokensToday: '今日 token',
         codexTokensBreakdown: '输入 {input} · 输出 {output} · 缓存 {cache}',
         codexTipTokens: '　今日 {total} token（入 {input} / 出 {output} / 缓存 {cache}）',
+        agyName: 'Gemini 订阅',
+        claudeName: 'Claude 订阅',
+        agyFiveHour: '5 小时',
+        agyWeekly: '本周',
+        agyActive: '在用',
+        agyUnavailable: '未连接 Antigravity',
+        agyStale: '快照已过期，等 agy-link 刷新',
+        agyTipStale: '　快照停在上次刷新，等 agy-link 刷新后再看',
+        agyTipOther: '　其余 {count} 个账号',
+        agyTipNoOther: '　没有其他账号',
+        agyTipFiveHourReset: '　5 小时窗重置于 {when}（还有 {left}）',
+        agyTipWeeklyReset: '　周窗重置于 {when}（还有 {left}）',
+        agyTipResetNow: '　即将重置',
+        agyPaceSurplus: '节奏充裕（富裕 +{pct}%）',
+        agyPaceFast: '消耗较快（超耗 {pct}%）',
+        agyPaceOnTrack: '消耗均衡',
+        agyNoAccounts: 'agy-link 里还没有账号',
         ofmName: 'OFM 模型',
         ofmTokensEmpty: '今天还没有调用',
         ofmCalls: '{count} 次调用',
         sectionBeichen: '北辰 API 栏',
         sectionCodex: 'GPT 订阅栏',
+        sectionAgy: 'Gemini 订阅栏',
+        sectionClaude: 'Claude 订阅栏',
         sectionOfm: 'OFM 模型栏',
         sectionWb: 'WorkBuddy 栏',
         sectionsHint: '大栏显示',
@@ -386,16 +412,36 @@ window.__ModuleLoader__.load({
         codexWhenDate: '{month} {day}, {time}',
         codexChipFiveHour: '5h',
         codexChipWeekly: '1w',
-        codexStale: 'snapshot expired, waiting for refresh',
+        codexStale: 'window reset, waiting for refresh',
+        codexAgedTip: '  reading from the {when} sample; window has not reset, still valid',
         codexTipStale: '  snapshot is from the last sample, waiting for the subscription plugin',
         codexTokensToday: 'Tokens today',
         codexTokensBreakdown: 'in {input} · out {output} · cache {cache}',
         codexTipTokens: '  {total} tokens today (in {input} / out {output} / cache {cache})',
+        agyName: 'Gemini subscription',
+        claudeName: 'Claude subscription',
+        agyFiveHour: '5-hour',
+        agyWeekly: 'This week',
+        agyActive: 'in use',
+        agyUnavailable: 'Antigravity not connected',
+        agyStale: 'snapshot expired, waiting for agy-link',
+        agyTipStale: '  snapshot is from the last refresh, waiting for agy-link',
+        agyTipOther: '  {count} other account(s)',
+        agyTipNoOther: '  no other accounts',
+        agyTipFiveHourReset: '  5-hour window resets at {when} ({left} left)',
+        agyTipWeeklyReset: '  weekly window resets at {when} ({left} left)',
+        agyTipResetNow: '  resets soon',
+        agyPaceSurplus: 'comfortable pace (+{pct}% spare)',
+        agyPaceFast: 'burning fast ({pct}% over)',
+        agyPaceOnTrack: 'on pace',
+        agyNoAccounts: 'no accounts in agy-link yet',
         ofmName: 'OFM models',
         ofmTokensEmpty: 'No calls today',
         ofmCalls: '{count} calls',
         sectionBeichen: 'Beichen API section',
         sectionCodex: 'GPT subscription section',
+        sectionAgy: 'Gemini subscription section',
+        sectionClaude: 'Claude subscription section',
         sectionOfm: 'OFM models section',
         sectionWb: 'WorkBuddy section',
         sectionsHint: 'Sections',
@@ -581,8 +627,8 @@ window.__ModuleLoader__.load({
     }
 
     /** 从 localStorage 读隐藏集合；存储不可用或内容损坏时返回空集合。 */
-    /** 大栏隐藏集合：只认四个合法键，其余丢弃。 */
-    const HIDDEN_SECTION_KEYS = ['beichen', 'codex', 'ofm', 'workbuddy']
+    /** 大栏隐藏集合：只认六个合法键，其余丢弃。 */
+    const HIDDEN_SECTION_KEYS = ['beichen', 'codex', 'agy', 'claude', 'ofm', 'workbuddy']
     function normalizeHiddenSections(raw) {
       const out = new Set()
       if (Array.isArray(raw)) {
@@ -1100,6 +1146,13 @@ window.__ModuleLoader__.load({
       return await res.json()
     }
 
+    /** 拉 Antigravity 账号池的配额快照。agy-link 没装时 available 为 false。 */
+    async function fetchAgy() {
+      const res = await fetch(AGY_URL, { cache: 'no-store' })
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      return await res.json()
+    }
+
     /** 拉 OFM 免费模型的今日 token 用量。cost-meter 没装时 available 为 false。 */
     async function fetchOfmTokens() {
       const res = await fetch(OFM_TOKENS_URL, { cache: 'no-store' })
@@ -1254,6 +1307,8 @@ window.__ModuleLoader__.load({
       // GPT 订阅限额快照与 OFM 模型今日 token：同样接在末尾，原因同上。
       const [codex, setCodex] = useState(null)
       const [ofmTokens, setOfmTokens] = useState(null)
+      // Gemini 订阅限额快照（agy-link 账号池）：同样接在末尾。
+      const [agy, setAgy] = useState(null)
       // 大栏隐藏集合：北辰 / GPT 订阅 / OFM 模型 / WorkBuddy 可在设置面板勾掉。
       const [hiddenSections, setHiddenSections] = useState(() => loadHiddenSections())
       // 写入与翻转必须在组件内：引用本组件的 state setter。放模块层会拿到
@@ -1280,6 +1335,14 @@ window.__ModuleLoader__.load({
       // OFM 模型分区的折叠状态：同样默认收起。
       const [ofmOpen, setOfmOpen] = useState(() => {
         try { return window.localStorage?.getItem(OFM_OPEN_KEY) === '1' } catch { return false }
+      })
+      // Gemini / Claude 订阅分区：默认收起。顶部只放正在使用的那个账号，
+      // 其余账号都在展开区里，收起时不会占高度。
+      const [agyOpen, setAgyOpen] = useState(() => {
+        try { return window.localStorage?.getItem(AGY_OPEN_KEY) === '1' } catch { return false }
+      })
+      const [claudeOpen, setClaudeOpen] = useState(() => {
+        try { return window.localStorage?.getItem(CLAUDE_OPEN_KEY) === '1' } catch { return false }
       })
 
       // 上一轮读数与串行保护：轮询和手动刷新可能重叠，只允许最新一轮落库。
@@ -1528,6 +1591,16 @@ window.__ModuleLoader__.load({
         } catch { /* 保留上一轮 */ }
       }, [])
 
+      /** 采一轮 Gemini 订阅限额；失败保留上一轮。 */
+      const pollAgy = useCallback(async () => {
+        try {
+          const next = await fetchAgy()
+          if (!alive.current) return
+          if (next?.available !== false) setAgy(next)
+          else setAgy(next)
+        } catch { /* 保留上一轮 */ }
+      }, [])
+
       /** 采一轮 OFM 模型今日 token；失败保留上一轮。 */
       const pollOfmTokens = useCallback(async () => {
         try {
@@ -1646,9 +1719,10 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         void pollCodex()
         void pollOfmTokens()
-        const timer = window.setInterval(() => { void pollCodex(); void pollOfmTokens() }, BEICHEN_POLL_MS)
+        void pollAgy()
+        const timer = window.setInterval(() => { void pollCodex(); void pollOfmTokens(); void pollAgy() }, BEICHEN_POLL_MS)
         return () => window.clearInterval(timer)
-      }, [pollCodex, pollOfmTokens])
+      }, [pollCodex, pollOfmTokens, pollAgy])
 
       // 注入悬停与过渡用的样式表。放在 effect 里：渲染阶段不碰 DOM，宿主
       // 不支持时 ensureStyles 自己安静跳过，退回纯 inline 表现。
@@ -2223,7 +2297,7 @@ window.__ModuleLoader__.load({
         // 整行是一个 button：切换由 onClick 直接完成，勾选框只做展示。
         // 这条路不经过 label→input 的原生转发，也不依赖原生 change 事件，
         // 因此不受受控 checkbox 的任何浏览器差异影响。
-        [['beichen', 'sectionBeichen'], ['codex', 'sectionCodex'], ['ofm', 'sectionOfm'], ['workbuddy', 'sectionWb']].map(([key, labelKey]) => {
+        [['beichen', 'sectionBeichen'], ['codex', 'sectionCodex'], ['agy', 'sectionAgy'], ['claude', 'sectionClaude'], ['ofm', 'sectionOfm'], ['workbuddy', 'sectionWb']].map(([key, labelKey]) => {
           const visible = !hiddenSections.has(key)
           return h('button', {
             key, type: 'button',
@@ -2617,11 +2691,17 @@ window.__ModuleLoader__.load({
       // 快照过期：样本还停在上次采样那一刻。DSH 关了一夜之后，5 小时窗早就
       // 翻过重置点，快照上那个百分比是上一轮的残留，直接显示会明显偏高。
       // 这种时候按缺失处理，界面给占位，等订阅插件写进新样本再显示。
+      // 逐窗口判断，而不是整块按「样本有多旧」一起丢：
+      // 订阅长期不用时样本会很旧，但只要还没到该窗口的重置点，百分比就一直
+      // 有效——用掉的部分不会自己涨回去。真正作废的只有翻过了重置点的窗口，
+      // Host 侧已经逐条标好 expired，这里只把那些剔掉。
       const codexStale = codex?.stale === true
-      const codexFiveHour = !codexStale && Array.isArray(codex?.windows)
-        ? codex.windows.find(row => row.kind === 'fiveHour') ?? null : null
-      const codexWeekly = !codexStale && Array.isArray(codex?.windows)
-        ? codex.windows.find(row => row.kind === 'weekly') ?? null : null
+      const codexPick = kind => Array.isArray(codex?.windows)
+        ? codex.windows.find(row => row.kind === kind && row.expired !== true) ?? null : null
+      const codexFiveHour = codexStale ? null : codexPick('fiveHour')
+      const codexWeekly = codexStale ? null : codexPick('weekly')
+      // 样本偏旧但读数仍然有效：长期不用订阅时的常态，提示里注明采样时刻即可。
+      const codexAged = codex?.aged === true && !codexStale
       const resetWhen = row => {
         if (row === null || !Number.isFinite(row.resetsAt)) return ''
         const ms = row.resetsAt - now
@@ -2687,12 +2767,15 @@ window.__ModuleLoader__.load({
             cache: formatTokens(codexTokens.cacheRead),
           }))
         }
-        // 过期时两个窗口都被按缺失处理，这里补一行说明，别让提示看起来像没装插件。
+        // 窗口已翻篇时两个读数都作废，这里补一行说明，别让提示看起来像没装插件。
         if (codexStale) line.push(t('codexTipStale'))
         // 快照里两个窗口都没有时不给空提示，否则标题栏连展开说明也一起没了。
         if (line.length === 0) return codexOpen ? t('codexTipCollapse') : t('codexTipExpand')
         const sampled = codexFiveHour?.sampledAt ?? codexWeekly?.sampledAt
         if (Number.isFinite(sampled)) line.push(fill(t('codexTipSampled'), { when: whenOf(sampled) }))
+        // 样本偏旧但窗口没翻篇：读数依然准，只是采样时间早。明确说出来，
+        // 免得用户看到旧时刻以为数字失效了。
+        if (codexAged) line.push(fill(t('codexAgedTip'), { when: whenOf(sampled) }))
         line.push(codexOpen ? t('codexTipCollapse') : t('codexTipExpand'))
         return line.join('\n')
       })()
@@ -2793,6 +2876,188 @@ window.__ModuleLoader__.load({
           }) : []
       const ofmTotalTokens = ofmTokens?.total === null || ofmTokens?.total === undefined ? null
         : (ofmTokens.total.input + ofmTokens.total.output + ofmTokens.total.cacheRead)
+      // ── Gemini / Claude 订阅分区 ────────────────────────────────────────
+      // 数据源是 agy-link 落盘的账号池快照（Host 侧读文件）。
+      //
+      // 拆成两个大栏的原因：Gemini 与 Claude 是两个互不相干的额度池，各自
+      // 有自己的 5 小时窗与周窗。而 pool.json 里 anthropic 与 openai 两个键
+      // 装的是**同一个**池子——agy-link 的 description 直接写明该组包含
+      // 「Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B」，两组读数逐字节
+      // 相同。所以 Claude 栏只取 anthropic 一组，GPT-OSS 不单独立栏：
+      // 再立一栏只会把同一份数字显示两遍，反而让人以为数量被翻倍了。
+      // 与 GPT 订阅栏同一套判据：样本旧不等于读数失效，只有翻过重置点的
+      // 那个窗口才作废。Host 侧已逐窗口标好 fiveHourExpired / weeklyExpired。
+      const agyStale = agy?.stale === true
+      const agyAged = agy?.aged === true && !agyStale
+      /** 当前正在使用的账号：Host 侧已经按 activeAccountIds → primary 排过序。 */
+      const agyActiveAccount = agy === null || agy.available !== true || !Array.isArray(agy.accounts)
+        ? null
+        : agy.accounts.find(row => row.id === agy.activeId) ?? agy.accounts[0] ?? null
+      /**
+       * 账号标题：优先用邮箱（能认出是哪个号），没有就退回 alias，再退回 id。
+       * 邮箱在悬浮提示里也给全，免得被省略号截断后认不出。
+       */
+      const agyAccountName = account => {
+        if (account === null) return ''
+        if (account.email !== '') return account.email
+        if (account.alias !== '') return account.alias
+        return account.id
+      }
+      /** 其余账号的数量：悬浮提示里给个规模，不占标题栏宽度。 */
+      const agyOtherCount = agy === null || !Array.isArray(agy.accounts)
+        ? 0 : Math.max(0, agy.accounts.length - (agyActiveAccount === null ? 0 : 1))
+      /** 一行「重置于何时（还有多久）」。labelKey 用来区分是哪个窗口。 */
+      const agyWhenText = (ms, labelKey) => Number.isFinite(ms) && ms > now
+        ? fill(t(labelKey), { when: whenOf(ms), left: span(ms - now, lang) })
+        : t('agyTipResetNow')
+      /**
+       * 造一个大栏。Gemini 与 Claude 的差别只有「取哪个模型族、叫什么名、
+       * 什么强调色、折叠状态存在哪」，其余结构完全一致，所以只写一份。
+       *
+       * @param {object} spec 分区参数：family / nameKey / accent / open / setOpen /
+       *   openKey / hiddenKey / attr
+       */
+      const agySectionOf = spec => {
+        // 该池子的读数在「当前账号」上的那一行：折叠态标题栏只反映它。
+        const rawFamily = agyStale ? null
+          : agyActiveAccount?.families?.find(row => row.family === spec.family) ?? null
+        // 单窗口失效：只把翻过重置点的那个窗口清掉，另一个照常显示。
+        const activeFamily = rawFamily === null ? null : {
+          ...rawFamily,
+          fiveHour: rawFamily.fiveHourExpired === true ? null : rawFamily.fiveHour,
+          weekly: rawFamily.weeklyExpired === true ? null : rawFamily.weekly,
+        }
+        const summary = (() => {
+          if (agyStale) return t('agyStale')
+          if (activeFamily === null) return t('agyUnavailable')
+          return [activeFamily.fiveHour, activeFamily.weekly].map((value, index) =>
+            value === null ? null : `${index === 0 ? t('agyFiveHour') : t('agyWeekly')} ${Math.round(value)}%`).filter(Boolean).join(' · ')
+        })()
+        const tip = (() => {
+          const line = []
+          const sep = lang === 'en' ? ': ' : '　'
+          if (agyActiveAccount !== null) {
+            line.push(`${agyAccountName(agyActiveAccount)}${sep}${t('agyActive')}`)
+            if (agyActiveAccount.planTier !== '') line.push(agyActiveAccount.planTier)
+            if (agyStale) line.push(t('agyTipStale'))
+            else if (activeFamily !== null) {
+              const parts = [activeFamily.label]
+              if (activeFamily.fiveHour !== null) parts.push(`${t('agyFiveHour')} ${Math.round(activeFamily.fiveHour)}%`)
+              if (activeFamily.weekly !== null) parts.push(`${t('agyWeekly')} ${Math.round(activeFamily.weekly)}%`)
+              line.push(parts.join(' · '))
+              // 两个窗口各给一行重置说明。只写 5 小时窗时，周额度什么时候回满
+              // 就无从判断，而那正是决定「要不要省着用」的依据。
+              if (activeFamily.fiveHourResetsAt !== null) {
+                line.push(agyWhenText(activeFamily.fiveHourResetsAt, 'agyTipFiveHourReset'))
+              }
+              if (activeFamily.weeklyResetsAt !== null) {
+                line.push(agyWhenText(activeFamily.weeklyResetsAt, 'agyTipWeeklyReset'))
+              }
+            }
+            line.push(agyOtherCount === 0 ? t('agyTipNoOther') : fill(t('agyTipOther'), { count: agyOtherCount }))
+          }
+          if (Number.isFinite(agy?.sampledAt)) line.push(fill(t('codexTipSampled'), { when: whenOf(agy.sampledAt) }))
+          if (agyAged) line.push(fill(t('codexAgedTip'), { when: whenOf(agy.sampledAt) }))
+          line.push(spec.open ? t('codexTipCollapse') : t('codexTipExpand'))
+          return line.join('\n')
+        })()
+        const toggle = () => {
+          resetAutoHeight()
+          spec.setOpen(open => {
+            const next = !open
+            try { window.localStorage?.setItem(spec.openKey, next ? '1' : '0') } catch { /* 存储不可用 */ }
+            return next
+          })
+        }
+        /**
+         * 一个账号的明细行：名称 + 该账号在这个池子上的两个窗口。
+         *
+         * 与 codex 栏同样的排布：条在中间、百分比在右，扫一眼就知道余量。
+         * 免费账号只有周配额，缺的那个窗口画空轨道并显示 —。
+         */
+        const accountRow = (account, depth, isActive) => {
+          const raw = agyStale
+            ? null : account?.families?.find(row => row.family === spec.family) ?? null
+          const family = raw === null ? null : {
+            ...raw,
+            fiveHour: raw.fiveHourExpired === true ? null : raw.fiveHour,
+            weekly: raw.weeklyExpired === true ? null : raw.weekly,
+          }
+          return h('div', { key: account.id, 'data-agy-account': account.id },
+            h('div', {
+              style: { ...style.wbRow, paddingLeft: depth }, className: 'ofm-row',
+            },
+              h('span', { style: { ...style.stripe, background: isActive ? spec.accent : 'transparent' } }),
+              h('span', { style: style.wbNameCell },
+                h('span', { style: style.wbName, title: agyAccountName(account) }, agyAccountName(account)),
+                h('span', { style: style.meta }, [
+                  account.planTier === '' ? null : account.planTier,
+                  isActive ? t('agyActive') : null,
+                  // 两个窗口各自的重置时间都要给出：只看 5 小时窗的话，周额度
+                  // 什么时候回满就无从判断，而那正是安排用量的依据。
+                  family === null || family.fiveHourResetsAt === null
+                    ? null : `${t('agyFiveHour')} ${fill(t('codexResets'), { when: whenOf(family.fiveHourResetsAt) })}`,
+                  family === null || family.weeklyResetsAt === null
+                    ? null : `${t('agyWeekly')} ${fill(t('codexResets'), { when: whenOf(family.weeklyResetsAt) })}`,
+                ].filter(Boolean).join(' · '))),
+              h('span', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                family === null ? null : barOf(family.fiveHour, 3, 26),
+                family === null ? null : barOf(family.weekly, 3, 40)),
+              h('span', { style: { ...style.wbAmount, display: 'flex', gap: 6, justifyContent: 'flex-end' } },
+                h('span', { style: { color: family?.fiveHour === null || family?.fiveHour === undefined ? 'var(--dsw-alias-label-secondary, #888)' : TONE[family.fiveHour <= 10 ? 'danger' : family.fiveHour <= 25 ? 'warn' : 'ok'] } },
+                  family?.fiveHour === null || family?.fiveHour === undefined ? '—' : `${Math.round(family.fiveHour)}%`),
+                h('span', { style: { color: family?.weekly === null || family?.weekly === undefined ? 'var(--dsw-alias-label-secondary, #888)' : TONE[family.weekly <= 10 ? 'danger' : family.weekly <= 25 ? 'warn' : 'ok'] } },
+                  family?.weekly === null || family?.weekly === undefined ? '—' : `${Math.round(family.weekly)}%`))),
+            agyStale
+              ? h('div', { style: { ...style.wbEmpty, paddingLeft: depth + 6 } }, t('agyTipStale'))
+              : family === null
+                ? h('div', { style: { ...style.wbEmpty, paddingLeft: depth + 6 } }, t('agyUnavailable'))
+                : null,
+          )
+        }
+        return h('div', {
+          style: { ...style.sectionWrap }, className: 'ofm-section',
+          [spec.attr]: 'section',
+        },
+          h('div', {
+            style: style.wbHead, className: 'ofm-head', onClick: toggle, role: 'button',
+            title: tip, 'aria-expanded': spec.open ? 'true' : 'false',
+          },
+            h('span', { style: { ...style.wbAccent, background: spec.accent } }),
+            h('span', { style: style.wbTitle }, t(spec.nameKey)),
+            // 折叠时标题栏永远只反映「正在使用的那个账号」：胶囊给百分比，
+            // 账号名在左边标题里，悬浮提示补全邮箱与其余账号数量。
+            agyStale || activeFamily === null
+              ? h('span', { style: { ...style.wbSum, marginLeft: 'auto' } }, summary)
+              : h('span', {
+                style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4, flex: '0 0 auto' },
+                [spec.attr + '-chips']: 'title',
+              },
+                activeFamily.fiveHour === null ? null : chipOf(t('codexChipFiveHour'), activeFamily.fiveHour),
+                activeFamily.weekly === null ? null : chipOf(t('codexChipWeekly'), activeFamily.weekly)),
+            caretOf(spec.open)),
+          // 展开区：按账号逐行排开，顶部那个账号排第一。
+          !spec.open ? null : (agy?.accounts ?? []).length === 0
+            ? h('div', { style: style.wbEmpty }, t('agyNoAccounts'))
+            : (agy?.accounts ?? []).map(account =>
+              accountRow(account, 18, agyActiveAccount !== null && account.id === agyActiveAccount.id)),
+        )
+      }
+      const agySection = agy === null || agy.available === false || hiddenSections.has('agy') ? null
+        : agySectionOf({
+          family: 'google', nameKey: 'agyName', accent: '#8E75F0',
+          open: agyOpen, setOpen: setAgyOpen, openKey: AGY_OPEN_KEY,
+          hiddenKey: 'agy', attr: 'data-ofm-credit-watch-agy',
+        })
+      // Claude 栏：只取 anthropic 一组。GPT-OSS 与它同池，不另立一栏。
+      const claudeSection = agy === null || agy.available === false || hiddenSections.has('claude') ? null
+        : agySectionOf({
+          family: 'anthropic', nameKey: 'claudeName', accent: '#D97757',
+          open: claudeOpen, setOpen: setClaudeOpen, openKey: CLAUDE_OPEN_KEY,
+          hiddenKey: 'claude', attr: 'data-ofm-credit-watch-claude',
+        })
+
+
       const ofmSection = ofmTokens === null || ofmTokens.available === false || hiddenSections.has('ofm') ? null
         : h('div', { style: { ...style.sectionWrap }, className: 'ofm-section', 'data-ofm-credit-watch-ofm': 'section' },
           h('div', {
@@ -2937,7 +3202,7 @@ window.__ModuleLoader__.load({
           // 列表视图：四个大栏依次排开。渠道列表、主分隔条与页脚已移除——
           // 余额、今日消耗、token 三者都收进「OFM 模型」栏，主界面不再有
           // 第二份渠道数据，也就没有需要拖高矮的列表了。
-          : [beichenSection, codexSection, ofmSection,
+          : [beichenSection, codexSection, agySection, claudeSection, ofmSection,
             hiddenSections.has('workbuddy') ? null : wbSection]),
         // 八向缩放热区。绝对定位，不占列表的流；平时透明，鼠标贴到边上才透出
         // 提示色——像 Windows 窗口的边框。角和边的提示语不同：角能同时改宽高。

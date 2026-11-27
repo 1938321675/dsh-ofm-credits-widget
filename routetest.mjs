@@ -14,6 +14,9 @@ import path from 'node:path'
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ofm-credit-watch-route-'))
 process.env.OFM_CREDIT_WATCH_DIR = temp
+// index.js 在模块顶层就把 DSH_HOME 求成了常量，所以必须在 import 之前指过去。
+// 否则读的是用户真实目录：GPT 订阅快照那组断言会读到线上数据而非本测试的假快照。
+process.env.DSH_HOME = temp
 // 用量路由默认读用户真实的 cost-meter 账本；测试指向一个不存在的文件，
 // 这样断言的是"读不到账本时的行为"，而不是当天真实用量。
 process.env.OFM_COST_METER_LEDGER = path.join(temp, 'no-such-ledger.json')
@@ -240,13 +243,56 @@ async function main() {
     checkTrue('WorkBuddy 账本文件已生成', files.includes('wb-last.json') && files.includes('wb-total.json'))
     checkTrue('WorkBuddy 当日账本已生成', files.some(name => name.startsWith('wb-daily-')))
     check('目录里只有这两套账本', files.length, 5)
-  } finally {
-    await new Promise(resolve => server.close(resolve))
-  }
+  // ── GPT 订阅快照的失效判定 ──
+  // 关键语义：样本旧不代表读数失效。用掉的部分不会自己涨回去，只要还没到
+  // 该窗口的重置点，快照上的百分比就一直有效。长期不用订阅时快照会很旧，
+  // 这时把读数藏起来恰恰是最需要它的时候（想先看一眼余量再决定要不要用）。
+  {
+    const forecast = path.join(temp, 'state', 'codex-subscription', 'quota-forecast.json')
+    const scope = 'scope-x'
+    /** 造一份快照：两窗各自的「样本多久前」与「还有多久重置」（负数=已过重置点）。 */
+    const writeForecast = (fiveAgeSec, weekAgeSec, fiveResetsInSec, weekResetsInSec) => {
+      const nowMs = Date.now()
+      const mk = (ageSec, resetsInSec, pct) => ({
+        resetsAt: Math.round((nowMs + resetsInSec * 1000) / 1000),
+        samples: [{ at: nowMs - ageSec * 1000, remainingPercent: pct }],
+      })
+      const body = { windows: {} }
+      body.windows[JSON.stringify([scope, 'codex', 18000])] = mk(fiveAgeSec, fiveResetsInSec, 73)
+      body.windows[JSON.stringify([scope, 'codex', 604800])] = mk(weekAgeSec, weekResetsInSec, 88)
+      fs.mkdirSync(path.dirname(forecast), { recursive: true })
+      fs.writeFileSync(forecast, JSON.stringify(body), 'utf8')
+    }
+    const readQuota = async () => {
+      const res = await fetch(`${base}/codex`)
+      return await res.json()
+    }
 
-  // 卸载 disposer 不该抛错。
-  for (const dispose of disposers) {
-    if (typeof dispose === 'function') dispose()
+    try {
+      // 样本两小时前，但两个窗口都还没到重置点：读数仍然有效。
+      writeForecast(7200, 7200, 3600, 86400 * 3)
+      const old = await readQuota()
+      checkTrue('样本很旧但窗口未翻篇时不算过期', old.stale === false)
+      checkTrue('样本很旧时标记 aged', old.aged === true)
+      check('窗口未翻篇时两个读数都可用', old.live, 2)
+      check('窗口未翻篇时仍给出余量', old.windows.map(row => Math.round(row.remainingPercent)), [73, 88])
+
+      // 5 小时窗已翻过重置点：这一窗作废，周窗仍有效，整体不算过期。
+      writeForecast(7200, 7200, -60, 86400 * 3)
+      const half = await readQuota()
+      checkTrue('单窗翻篇时整体仍可用', half.stale === false)
+      check('单窗翻篇后只剩一个有效窗口', half.live, 1)
+      check('翻篇的窗口被标 expired', half.windows.find(row => row.kind === 'fiveHour').expired, true)
+      check('未翻篇的窗口不被标 expired', half.windows.find(row => row.kind === 'weekly').expired, false)
+
+      // 两个窗口都翻过重置点：这时才真的没有可用读数，界面该给占位。
+      writeForecast(7200, 7200, -60, -60)
+      const dead = await readQuota()
+      checkTrue('两个窗口都翻篇时判过期', dead.stale === true)
+      check('两个窗口都翻篇时没有有效读数', dead.live, 0)
+    } finally {
+      fs.rmSync(path.join(temp, 'state'), { recursive: true, force: true })
+    }
   }
 
   if (failures.length > 0) {
@@ -256,6 +302,15 @@ async function main() {
   } else {
     console.log(`✓ ${checks} 项路由检查全部通过`)
   }
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+  }
+
+  // 卸载 disposer 不该抛错。
+  for (const dispose of disposers) {
+    if (typeof dispose === 'function') dispose()
+  }
+
   fs.rmSync(temp, { recursive: true, force: true })
   void port
 }

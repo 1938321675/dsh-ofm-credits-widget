@@ -1376,13 +1376,22 @@ const CODEX_WINDOWS = [
 ]
 
 /**
- * 快照多久没更新就算过期。
+ * 快照是否还能代表「现在」——判据不是样本有多旧，而是窗口有没有翻篇。
  *
- * 订阅插件跑起来时每 5～60 秒写一次样本（见它的 quotaRefreshMs：用得越多写得越勤），
- * 所以十几分钟没有新样本只可能是一种情况——它这一阵没在采样，通常就是 DSH 关着。
- * 这段时间里 5 小时窗多半已经翻过了重置点，快照上的百分比是上一轮的残留，
- * 拿它当「现在还剩多少」会明显偏高。超过这个时长就标 stale，界面改为占位，
- * 等它把新样本写进来再显示。
+ * 订阅插件只在真正有调用时才采样（见它的 quotaRefreshMs：用得越多写得越勤）。
+ * 订阅长时间不用的时候，最后一个样本会很旧，但**额度并没有变**：只要还没到
+ * resetsAt，窗口里的百分比就一直有效，用掉的部分不会自己长回去。此时把读数
+ * 藏起来换成「已过期」，等于在最需要它的时候把数据拿走了——恰恰是长时间没
+ * 用、想先看一眼还剩多少再决定要不要开的时候。
+ *
+ * 真正会失效的只有一种情况：快照停在了上次关机那一刻，之后窗口翻过了重置点。
+ * 那时旧百分比是上一轮的残留，拿来显示会明显偏高。所以逐窗口比较 resetsAt：
+ * 已经过了重置点就意味着这一窗的数字作废（重置后余量回到满额，但重置后的
+ * 实际消耗本插件无从得知，只能等新样本）。
+ *
+ * 另加一个宽松的上限兜底：样本再旧也不该超过一个 5 小时窗口还没更新过，
+ * 超过说明订阅插件确实停摆了，但这种情况下面板也不该空着——照常显示读数，
+ * 只在悬浮提示里注明采样时刻，让用户自己判断。
  */
 const CODEX_STALE_MS = 15 * 60 * 1000
 
@@ -1407,14 +1416,20 @@ function readCodexQuota() {
     const remaining = last === null ? null : Number(last.remainingPercent)
     if (!Number.isFinite(remaining)) continue
     const matched = CODEX_WINDOWS.find(row => row.key === seconds)
+    const resetsAt = Number.isFinite(Number(record?.resetsAt)) ? Number(record.resetsAt) * 1000 : null
+    const sampledAt = last === null ? null : Number(last.at)
+    // 采样之后窗口翻过了重置点：旧百分比属于上一轮，不能当作「现在还剩」。
+    // 没有 resetsAt 时无从判断，只能按未失效处理（读数本身仍是最后一次真实值）。
+    const expired = resetsAt !== null && sampledAt !== null && resetsAt > sampledAt && resetsAt <= Date.now()
     windows.push({
       scope,
       limitId,
       windowSeconds: seconds,
       kind: matched?.label ?? (seconds < 3600 * 24 ? 'short' : 'long'),
       remainingPercent: Math.max(0, Math.min(100, remaining)),
-      resetsAt: Number.isFinite(Number(record?.resetsAt)) ? Number(record.resetsAt) * 1000 : null,
-      sampledAt: last === null ? null : Number(last.at),
+      resetsAt,
+      sampledAt,
+      expired,
     })
   }
   // 只留 codex 主限额：scope 取最新样本的那一组，其余（code_review 等）不进面板。
@@ -1431,7 +1446,14 @@ function readCodexQuota() {
   // 陈旧判定放在 Host 侧：浏览器算不出「样本是不是早就该翻篇了」，
   // 它只看得到一个百分比。开机那一刻快照还停在上次关机的读数，这里必须先拦下。
   const ageMs = Math.max(0, Date.now() - latest)
-  return { available: true, windows: picked, sampledAt: latest, ageMs, stale: ageMs > CODEX_STALE_MS, tokens: todayTokens }
+  // 只有「全部窗口都已翻篇」才算过期：这时一个能用的读数都没有，界面该给占位。
+  // 只要还有窗口没到重置点，它上面的百分比就是当前有效值，照常显示。
+  const live = picked.filter(row => row.expired !== true)
+  const stale = live.length === 0
+  // 样本偏旧但仍有效（长期不用订阅时的常态）：标记出来，界面降为提示语气
+  // 但在悬浮说明里注明采样时刻，而不是把数字藏起来。
+  const aged = ageMs > CODEX_STALE_MS
+  return { available: true, windows: picked, live: live.length, sampledAt: latest, ageMs, stale, aged, tokens: todayTokens }
 }
 
 // ── OFM 模型今日 token（cost-meter）────────────────────────────────────────
@@ -1480,6 +1502,157 @@ function readOfmTokenUsage() {
     grand.calls += Number(row?.calls ?? 0)
   }
   return { available: true, day: date, channels: Object.values(channels), total: grand }
+}
+
+// ── Gemini 订阅限额（dsh-agy-link）──────────────────────────────────────────
+/**
+ * agy-link 把每个 Google Antigravity 账号的配额快照落在
+ * `~/.dsh/agy-accounts/pool.json`。`accounts[].quotas` 下按模型族分组
+ * （`google` = Gemini，`anthropic` / `openai` = Claude 与 GPT-OSS），
+ * 每组给出 5 小时窗与周窗的剩余比例和重置时刻：
+ *
+ * ```
+ * { remainingFraction, resetTime, weeklyFraction, weeklyResetTime, updatedAt }
+ * ```
+ *
+ * 这里只读它落好的盘，不复制 OAuth 生命周期——agy-link 自己的
+ * AccountQuotaRefresher 会持续刷写这份快照，数据最多滞后一轮刷新。
+ * 它与本插件的 codex 栏是同一种思路，只是数据源换了一个文件。
+ */
+const AGY_POOL_FILE = 'agy-accounts/pool.json'
+
+/**
+ * 快照多久没刷新算「偏旧」。
+ *
+ * agy-link 在运行时按自己的节拍刷写 pool.json（实测十几秒一次）。长期不用
+ * Google Antigravity 时它会停采，样本随之变旧。但这不代表读数失效——判据是
+ * 窗口有没有翻篇，不是样本时间；老样本只在悬浮提示里注明采样时刻。
+ */
+const AGY_STALE_MS = 15 * 60 * 1000
+
+/** 模型族 → 面板上的显示名。顺序即展开后的行顺序，Gemini 在前。 */
+const AGY_FAMILIES = [
+  { key: 'google', label: 'Gemini' },
+  { key: 'anthropic', label: 'Claude' },
+  { key: 'openai', label: 'GPT-OSS' },
+]
+
+/** 把一个 ISO 时刻字符串转成毫秒时间戳；解析不了给 null。 */
+function agyTimeOf(value) {
+  if (typeof value !== 'string' || value === '') return null
+  const ms = Date.parse(value)
+  return Number.isFinite(ms) ? ms : null
+}
+
+/**
+ * 把一份账号快照压成面板要的形状。
+ *
+ * 缺窗口如实给 null 而不是丢掉整个模型族：agy-link 对免费账号只给周配额，
+ * 汇总接口被拒时也可能只留下半个快照。界面据此在该窗画空轨道并显示 —，
+ * 另一个窗口的读数照常呈现。
+ */
+function agyFamiliesOf(quotas) {
+  if (quotas === null || typeof quotas !== 'object') return []
+  const out = []
+  for (const family of AGY_FAMILIES) {
+    const row = quotas[family.key]
+    if (row === null || typeof row !== 'object') continue
+    const five = Number(row.remainingFraction)
+    const week = Number(row.weeklyFraction)
+    if (!Number.isFinite(five) && !Number.isFinite(week)) continue
+    out.push({
+      family: family.key,
+      label: family.label,
+      fiveHour: Number.isFinite(five) ? Math.max(0, Math.min(100, five * 100)) : null,
+      fiveHourResetsAt: agyTimeOf(row.resetTime),
+      weekly: Number.isFinite(week) ? Math.max(0, Math.min(100, week * 100)) : null,
+      weeklyResetsAt: agyTimeOf(row.weeklyResetTime),
+      updatedAt: Number.isFinite(Number(row.updatedAt)) ? Number(row.updatedAt) : null,
+    })
+  }
+  return out
+}
+
+/**
+ * 汇总 Antigravity 账号池的配额快照。
+ *
+ * 面板顶部固定显示「当前正在使用的账号」——`activeAccountIds.google` 指向
+ * 它，取不到时退回 `primaryAccountId`，再退回第一个启用的账号。其余账号
+ * （以及被选中账号的 Claude / GPT-OSS）都只在展开区里逐行列出。
+ */
+function readAgyQuota() {
+  let pool
+  try {
+    pool = JSON.parse(readFileSync(path.join(DSH_HOME, AGY_POOL_FILE), 'utf8'))
+  } catch {
+    // agy-link 没装或还没写过快照：返回 available:false，面板据此显示占位。
+    return { available: false, accounts: [], activeId: null, sampledAt: null, stale: false }
+  }
+  const raw = Array.isArray(pool?.accounts) ? pool.accounts : []
+  const accounts = []
+  for (const account of raw) {
+    if (account === null || typeof account !== 'object') continue
+    if (account.enabled === false) continue
+    const families = agyFamiliesOf(account.quotas)
+    accounts.push({
+      id: String(account.id ?? ''),
+      // alias 是可改的备注名，email 才是能认出「这是哪个号」的那一项。
+      alias: typeof account.alias === 'string' ? account.alias : '',
+      email: typeof account.email === 'string' ? account.email : '',
+      planTier: typeof account.planTier === 'string' ? account.planTier : '',
+      families,
+    })
+  }
+  const activeOf = pool?.activeAccountIds
+  const activeId = String(
+    activeOf?.google ?? pool?.primaryAccountId ?? pool?.lastActiveAccountId
+    ?? accounts[0]?.id ?? '',
+  )
+  const active = accounts.find(row => row.id === activeId) ?? accounts[0] ?? null
+  // 采样时刻取全池最新的 updatedAt：它说明「这份快照有多新」，与具体哪个
+  // 账号被选中无关。agy-link 一次刷新会把所有账号差不多同时更新。
+  let sampledAt = null
+  for (const account of raw) {
+    const quotas = account?.quotas
+    if (quotas === null || typeof quotas !== 'object') continue
+    for (const family of AGY_FAMILIES) {
+      const at = Number(quotas[family.key]?.updatedAt)
+      if (Number.isFinite(at) && (sampledAt === null || at > sampledAt)) sampledAt = at
+    }
+  }
+  if (accounts.length === 0) {
+    return { available: false, accounts: [], activeId: null, sampledAt: null, stale: false }
+  }
+  const ageMs = sampledAt === null ? null : Math.max(0, Date.now() - sampledAt)
+  // 与 GPT 订阅栏同一套判据：样本旧不等于读数失效。agy-link 只在真正有调用
+  // 时才刷新，长时间不用 Google Antigravity 时 updatedAt 会很旧，但只要还没到
+  // 该窗口的重置点，百分比就一直有效。只有采样本时之后已经翻过重置点的那一
+  // 窗口才作废——那时旧值是上一轮的残留。
+  const nowMs = Date.now()
+  for (const account of accounts) {
+    for (const family of account.families) {
+      for (const [pctKey, resetKey] of [['fiveHour', 'fiveHourResetsAt'], ['weekly', 'weeklyResetsAt']]) {
+        const resetAt = family[resetKey]
+        const sampled = family.updatedAt
+        family[`${pctKey}Expired`] = resetAt !== null && sampled !== null && resetAt > sampled && resetAt <= nowMs
+      }
+    }
+  }
+  // 只要还有任一账号的任一窗口没翻篇，这份快照就仍然可用。
+  const anyLive = accounts.some(account =>
+    account.families.some(family => family.fiveHourExpired !== true || family.weeklyExpired !== true))
+  return {
+    available: true,
+    accounts,
+    activeId: active?.id ?? null,
+    sampledAt,
+    ageMs,
+    // 失效判定放 Host 侧：浏览器只看得到一个百分比，算不出窗口是不是翻篇了。
+    stale: !anyLive,
+    // 样本偏旧但读数仍然有效（长期不用 Antigravity 时的常态）：界面照常显示，
+    // 只在悬浮提示里注明采样时刻，而不是把数字藏起来。
+    aged: ageMs !== null && ageMs > AGY_STALE_MS,
+  }
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
@@ -1568,6 +1741,11 @@ async function handleApi(req, res) {
       if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
       return sendJson(res, 200, readCodexQuota())
     }
+    // Gemini 订阅限额：读 agy-link 落盘的账号池快照。
+    if (route === '/agy') {
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
+      return sendJson(res, 200, readAgyQuota())
+    }
     // OFM 免费模型的今日 token：读 cost-meter 账本。
     if (route === '/ofm-tokens') {
       if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
@@ -1652,7 +1830,7 @@ export const __test = {
   fetchBeichen, fetchBeichenKey, readBeichen, readBeichenKeys, readBeichenKey,
   readBeichenTokens, readBeichenTokensSync, fetchBeichenStats, readBeichenTodayStats,
   beichenFile, normalizeBeichenModels, mergeBeichenDays, mergeBeichenModels,
-  readCodexQuota, readOfmTokenUsage,
+  readCodexQuota, readOfmTokenUsage, readAgyQuota, agyFamiliesOf,
   recordTokenUsage, readLocalTokenUsage, tokensFile, bucketsOf,
   backfillTodayFromSessionLogs, listSessionLogs, decompressSessionLog, CODEX_PROVIDERS,
 }
