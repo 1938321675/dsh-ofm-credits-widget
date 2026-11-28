@@ -295,6 +295,50 @@ async function main() {
     }
   }
 
+  // ── /agy：限额响应同时带两个订阅栏的今日 token ─────────────────────────
+  {
+    const poolDir = path.join(temp, 'agy-accounts')
+    fs.mkdirSync(poolDir, { recursive: true })
+    fs.writeFileSync(path.join(poolDir, 'pool.json'), JSON.stringify({
+      version: 1,
+      accounts: [{
+        id: 'acc_a', alias: 'primary', email: 'a@example.com', planTier: 'pro', enabled: true,
+        quotas: {
+          google: {
+            remainingFraction: 0.7, resetTime: '2099-01-01T00:00:00Z',
+            weeklyFraction: 0.8, weeklyResetTime: '2099-01-08T00:00:00Z', description: '', updatedAt: Date.now(),
+          },
+          anthropic: {
+            weeklyFraction: 0.9, weeklyResetTime: '2099-01-08T00:00:00Z', description: '', updatedAt: Date.now(),
+          },
+        },
+      }],
+      primaryAccountId: 'acc_a',
+      activeAccountIds: { google: 'acc_a', anthropic: 'acc_a' },
+      lastActiveAccountId: 'acc_a',
+    }), 'utf8')
+    // 本地采集账本里放两个订阅栏的今日用量，验证响应把两栏一起带回。
+    const date = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' })
+    fs.writeFileSync(path.join(temp, 'ofm-tokens-' + date + '.json'), JSON.stringify({
+      date,
+      channels: {},
+      workbuddy: { input: 0, output: 0, cacheRead: 0, calls: 0 },
+      agyGemini: { input: 100, output: 50, cacheRead: 900, calls: 2 },
+      agyClaude: { input: 200, output: 80, cacheRead: 1800, calls: 3 },
+    }), 'utf8')
+
+    const res = await fetch(base + '/agy')
+    check('GET /agy 200', res.status, 200)
+    const body = await res.json()
+    check('agy 读数可用', body.available, true)
+    checkTrue('agy 读数带 Gemini 栏 token', body.tokens && body.tokens.gemini && body.tokens.gemini.input === 100)
+    checkTrue('agy 读数带 Claude 栏 token', body.tokens && body.tokens.claude && body.tokens.claude.input === 200)
+    checkTrue('agy 读数带账号池', Array.isArray(body.accounts) && body.accounts.length === 1)
+
+    fs.rmSync(poolDir, { recursive: true, force: true })
+    fs.rmSync(path.join(temp, 'ofm-tokens-' + date + '.json'), { force: true })
+  }
+
   if (failures.length > 0) {
     console.error(`✗ ${failures.length}/${checks} 项失败`)
     for (const line of failures) console.error('  - ' + line)

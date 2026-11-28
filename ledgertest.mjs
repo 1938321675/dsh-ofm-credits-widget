@@ -331,6 +331,143 @@ async function main() {
     delete process.env.OFM_CREDIT_WATCH_DIR === undefined ? 'x' : 'x'
     delete process.env.OFM_COST_METER_LEDGER
   }
+
+  // ── 18. Antigravity 订阅线路：按模型名分栏 ───────────────────────────────
+  // Gemini 与 Claude 共用一条线路，账本里靠模型名前缀归栏。
+  {
+    check('模型归类：Gemini 族归 Gemini 栏', t.agyBucketOf('gemini-4-neon'), 'agyGemini')
+    check('模型归类：Orchestrator 也是 Gemini 族', t.agyBucketOf('gemini-pro-orchestrator'), 'agyGemini')
+    check('模型归类：Claude 族归 Claude 栏', t.agyBucketOf('claude-opus-5-5'), 'agyClaude')
+    check('模型归类：GPT-OSS 与 Claude 同池，归 Claude 栏', t.agyBucketOf('gpt-oss-120b-medium'), 'agyClaude')
+    check('模型归类：未知模型不归任何一栏', t.agyBucketOf('some-future-model'), null)
+    check('模型归类：空模型名不归栏', t.agyBucketOf(''), null)
+    check('模型归类：非字符串不归栏', t.agyBucketOf(null), null)
+    check('订阅线路只有一个 provider id', t.AGY_PROVIDERS, ['antigravity'])
+    check('两个栏的槽位名固定', t.AGY_BUCKETS, ['agyGemini', 'agyClaude'])
+  }
+
+  // ── 19. 订阅线路按模型并入按天汇总 ───────────────────────────────────────
+  {
+    const dir = freshDir()
+    const ledger = path.join(dir, 'ledger.json')
+    fs.writeFileSync(ledger, JSON.stringify({
+      version: 1,
+      days: {
+        '2026-11-12': { date: '2026-11-12', byProviderModel: {
+          'antigravity:gemini-4-neon': { input: 100, output: 50, cacheRead: 1000, calls: 2 },
+          'antigravity:claude-opus-5-5': { input: 200, output: 80, cacheRead: 2000, calls: 3 },
+          'antigravity:gpt-oss-120b-medium': { input: 50, output: 20, cacheRead: 400, calls: 1 },
+          'antigravity:unknown-model': { input: 999, output: 999, cacheRead: 999, calls: 9 },
+        } },
+      },
+    }), 'utf8')
+    process.env.OFM_COST_METER_LEDGER = ledger
+    t.usageCache.key = ''
+
+    const stats = t.readUsageStats()
+    const day = stats.days[0]
+    // GPT-OSS 与 Claude 同池，两行合成一个 Claude 栏；未知模型两栏都不进。
+    check('按天汇总分出 Gemini 栏', day.agyGemini.input, 100)
+    check('按天汇总 Gemini 栏缓存读', day.agyGemini.cacheRead, 1000)
+    check('按天汇总分出 Claude 栏', day.agyClaude.input, 250)
+    check('按天汇总 Claude 栏调用数含 GPT-OSS', day.agyClaude.calls, 4)
+    check('按天汇总 Claude 栏缓存读', day.agyClaude.cacheRead, 2400)
+    check('订阅线路不进 OFM 渠道明细', day.byChannel.antigravity, undefined)
+    check('订阅线路不进 OFM 合计', day.ofm.input, 0)
+
+    delete process.env.OFM_COST_METER_LEDGER
+  }
+
+  // ── 20. 本地账本的订阅栏读数 ────────────────────────────────────────────
+  {
+    const dir = freshDir()
+    const date = t.todayKey()
+    fs.writeFileSync(path.join(dir, 'ofm-tokens-' + date + '.json'), JSON.stringify({
+      date,
+      channels: {},
+      workbuddy: { input: 0, output: 0, cacheRead: 0, calls: 0 },
+      agyGemini: { input: 100, output: 50, cacheRead: 900, calls: 2 },
+      agyClaude: { input: 200, output: 80, cacheRead: 1800, calls: 3 },
+    }), 'utf8')
+
+    const read = t.readLocalTokenUsage()
+    check('本地读数带 Gemini 栏', read.agyGemini.input, 100)
+    check('本地读数带 Claude 栏', read.agyClaude.cacheRead, 1800)
+    // 限额接口把两个栏一起回给浏览器。
+    const totals = t.agyTokenTotals()
+    check('限额接口给 Gemini 一栏', totals.gemini.input, 100)
+    check('限额接口给 Claude 一栏', totals.claude.input, 200)
+    // 账本里没有订阅记录时，限额接口给两栏空桶，而不是缺失。
+    freshDir()
+    const emptyTotals = t.agyTokenTotals()
+    check('没有本地账本时 Gemini 栏是空桶', emptyTotals.gemini, { input: 0, output: 0, cacheRead: 0, calls: 0 })
+    check('没有本地账本时 Claude 栏是空桶', emptyTotals.claude, { input: 0, output: 0, cacheRead: 0, calls: 0 })
+  }
+
+  // ── 21. 回填：同一次调用的多行只记一次，且按模型归栏 ────────────────────
+  {
+    const dir = freshDir()
+    const sessionsRoot = path.join(temp, 'sessions-case')
+    const sessionDir = path.join(sessionsRoot, 'proj', 'sess-a')
+    fs.mkdirSync(sessionDir, { recursive: true })
+    // 同一会话里同一次调用在日志里留下三行 assistant/message（增量与收尾），
+    // 三行 usage 相同、时间差不到一秒：这是回填最容易记成两遍的情形。
+    const line = (time, model, input, output, cacheRead) => JSON.stringify({
+      type: 'assistant/message',
+      time,
+      data: {
+        message: { source: { kind: 'model', provider: 'antigravity', model } },
+        usage: { inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, totalTokens: input + output + cacheRead },
+      },
+    })
+    const base = Date.now() - 120_000
+    fs.writeFileSync(path.join(sessionDir, 'session.v1.jsonl'), [
+      line(base, 'gemini-4-neon', 100, 50, 1000),
+      line(base + 300, 'gemini-4-neon', 100, 50, 1000),
+      line(base + 600, 'gemini-4-neon', 100, 50, 1000),
+      line(base + 9000, 'claude-opus-5-5', 200, 80, 2000),
+    ].join(String.fromCharCode(10)), 'utf8')
+    // 一个改动过的旧版日志：应被跳过，不参与统计。
+    fs.writeFileSync(path.join(sessionDir, 'session.v0.jsonl'), '{ 旧版本日志', 'utf8')
+
+    const out = t.backfillTodayFromSessionLogs(sessionsRoot)
+    check('回填报告有更新', out.updated, true)
+    const state = JSON.parse(fs.readFileSync(path.join(dir, 'ofm-tokens-' + t.todayKey() + '.json'), 'utf8'))
+    // 三行重复只记一次：调用次数是 1，缓存读也只算一次，而不是三遍。
+    check('同一次调用的多行只记一次', state.agyGemini.calls, 1)
+    check('同一次调用的三桶只累加一次', state.agyGemini.cacheRead, 1000)
+    check('回填后 Claude 栏有记录', state.agyClaude.input, 200)
+    check('回填后 Claude 栏缓存读', state.agyClaude.cacheRead, 2000)
+    check('旧版本日志被跳过', state.agyClaude.calls, 1)
+  }
+
+  // ── 21b. 回填：去重窗口外的同一笔调用照常计入 ──────────────────────────
+  {
+    const dir = freshDir()
+    const sessionsRoot = path.join(temp, 'sessions-case2')
+    const sessionDir = path.join(sessionsRoot, 'proj', 'sess-b')
+    fs.mkdirSync(sessionDir, { recursive: true })
+    const line = (time, model, input, output, cacheRead) => JSON.stringify({
+      type: 'assistant/message',
+      time,
+      data: {
+        message: { source: { kind: 'model', provider: 'antigravity', model } },
+        usage: { inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, totalTokens: input + output + cacheRead },
+      },
+    })
+    const base = Date.now() - 60_000
+    fs.writeFileSync(path.join(sessionDir, 'session.v1.jsonl'), [
+      line(base, 'gemini-4-neon', 100, 50, 1000),
+      // 超过去重窗口的另一笔调用：指纹不同，应当照常计入。
+      line(base + 30_000, 'gemini-4-neon', 300, 60, 3000),
+    ].join(String.fromCharCode(10)), 'utf8')
+
+    t.backfillTodayFromSessionLogs(sessionsRoot)
+    const state = JSON.parse(fs.readFileSync(path.join(dir, 'ofm-tokens-' + t.todayKey() + '.json'), 'utf8'))
+    check('去重窗口外的调用正常计入', state.agyGemini.calls, 2)
+    check('去重窗口外的调用三桶累加', state.agyGemini.cacheRead, 4000)
+  }
+
   // 北辰按模型明细：累计口径，按 token 量降序，缺模型名的行丢弃。
   {
     const models = t.normalizeBeichenModels([

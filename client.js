@@ -303,6 +303,8 @@ window.__ModuleLoader__.load({
         agyPaceFast: '消耗较快（超耗 {pct}%）',
         agyPaceOnTrack: '消耗均衡',
         agyNoAccounts: 'agy-link 里还没有账号',
+        agyTokensToday: '今日 token',
+        agyTokensBreakdown: '输入 {input} · 输出 {output} · 缓存 {cache}',
         ofmName: 'OFM 模型',
         ofmTokensEmpty: '今天还没有调用',
         ofmCalls: '{count} 次调用',
@@ -435,6 +437,8 @@ window.__ModuleLoader__.load({
         agyPaceFast: 'burning fast ({pct}% over)',
         agyPaceOnTrack: 'on pace',
         agyNoAccounts: 'no accounts in agy-link yet',
+        agyTokensToday: 'Tokens today',
+        agyTokensBreakdown: 'in {input} · out {output} · cache {cache}',
         ofmName: 'OFM models',
         ofmTokensEmpty: 'No calls today',
         ofmCalls: '{count} calls',
@@ -2130,9 +2134,10 @@ window.__ModuleLoader__.load({
           border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3))',
           color: 'var(--dsw-alias-label-secondary, #888)',
         },
-        // 三个大数字并排：合计给得最大，它是这一页要回答的问题。
+        // 统计格：四个一行，七项排两行——面板 340px 宽时每格 80px 左右，
+        // 数字与标签都放得下。
         statsTotals: {
-          display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 5,
+          display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 5,
           padding: '2px 10px 5px',
         },
         statsTotalCell: { minWidth: 0 },
@@ -2376,6 +2381,11 @@ window.__ModuleLoader__.load({
         // 但它同样属于「这天用掉多少」，所以单独一行统计、单独一格合计。
         const codexRow = picked.codex ?? null
         const codexTotal = totalTokens(codexRow)
+        // 两个订阅栏：与 GPT 订阅同一口径，各自一格、各自一行。
+        const agyGeminiRow = picked.agyGemini ?? null
+        const agyClaudeRow = picked.agyClaude ?? null
+        const agyGeminiTotal = totalTokens(agyGeminiRow)
+        const agyClaudeTotal = totalTokens(agyClaudeRow)
         // 北辰：接口只回当天，历史由 Host 逐日攒在 beichen.days 里，跟同一个
         // 日期条翻。它同样是「这天用掉多少」的一路，进合计与三桶构成。
         const beichenDay = beichen === null || beichen.configured === false ? null
@@ -2388,7 +2398,7 @@ window.__ModuleLoader__.load({
         const beichenTotal = beichenBucket === null ? null
           : beichenBucket.input + beichenBucket.cacheRead + beichenBucket.output
         // 当天三桶构成：输入 / 缓存命中 / 输出。合计那个数字由它们组成。
-        const buckets = sumBuckets(picked.ofm, picked.workbuddy, codexRow, beichenBucket)
+        const buckets = sumBuckets(picked.ofm, picked.workbuddy, codexRow, beichenBucket, agyGeminiRow, agyClaudeRow)
         // 渠道行只列当天有调用的，没调用的渠道不占地方。
         const channels = CHANNELS
           .map(channel => ({ channel, row: picked.byChannel?.[channel.id] }))
@@ -2425,7 +2435,8 @@ window.__ModuleLoader__.load({
             h('div', { style: style.statsTotalCell },
               h('div', { style: style.statsTotalLabel }, t('statsTotal')),
               h('div', { style: style.statsTotalValue },
-                formatTokens((ofmTotal || 0) + (wbTotal || 0) + (codexTotal || 0) + (beichenTotal || 0)))),
+                formatTokens((ofmTotal || 0) + (wbTotal || 0) + (codexTotal || 0)
+                  + (agyGeminiTotal || 0) + (agyClaudeTotal || 0) + (beichenTotal || 0)))),
             h('div', { style: style.statsTotalCell },
               h('div', { style: style.statsTotalLabel }, t('statsOfm')),
               h('div', { style: style.statsTotalValue }, formatTokens(ofmTotal))),
@@ -2436,6 +2447,14 @@ window.__ModuleLoader__.load({
               h('div', { style: style.statsTotalLabel }, t('statsCodex')),
               h('div', { style: { ...style.statsTotalValue }, 'data-codex-token-total': 'true' },
                 codexTotal === null ? '0' : formatTokens(codexTotal))),
+            h('div', { style: style.statsTotalCell },
+              h('div', { style: style.statsTotalLabel }, t('agyName')),
+              h('div', { style: style.statsTotalValue, 'data-agy-gemini-token-total': 'true' },
+                agyGeminiTotal === null ? '0' : formatTokens(agyGeminiTotal))),
+            h('div', { style: style.statsTotalCell },
+              h('div', { style: style.statsTotalLabel }, t('claudeName')),
+              h('div', { style: style.statsTotalValue, 'data-agy-claude-token-total': 'true' },
+                agyClaudeTotal === null ? '0' : formatTokens(agyClaudeTotal))),
             h('div', { style: style.statsTotalCell },
               h('div', { style: style.statsTotalLabel }, t('statsBeichen')),
               h('div', { style: style.statsTotalValue, 'data-beichen-token-total': 'true' },
@@ -2456,6 +2475,7 @@ window.__ModuleLoader__.load({
             'data-stats-list': 'true',
           },
             channels.length === 0 && codexTotal === null
+              && agyGeminiTotal === null && agyClaudeTotal === null
               ? h('div', { style: style.statsHint }, t('statsEmpty'))
               : [
                 ...channels.map(item => h('div', {
@@ -2481,6 +2501,27 @@ window.__ModuleLoader__.load({
                   h('span', { style: style.statsNumbers },
                     h('span', { style: style.statsAmount }, formatTokens(codexTotal)),
                     h('span', { style: style.statsCalls }, fill(t('statsCalls'), { count: codexRow.calls || 0 })))),
+                // 两个订阅栏：与 GPT 订阅并列，走各自的身份色，别被当成 OFM 渠道。
+                agyGeminiTotal === null ? null : h('div', {
+                  key: '__agyGemini', style: style.statsRow, className: 'ofm-row', 'data-stats-agy': 'gemini',
+                },
+                  h('span', { style: { ...style.stripe, background: '#8E75F0' } }),
+                  h('span', { style: style.statsNameCell },
+                    h('span', { style: style.statsName }, t('agyName')),
+                    h('span', { style: style.meta }, breakdownText(agyGeminiRow))),
+                  h('span', { style: style.statsNumbers },
+                    h('span', { style: style.statsAmount }, formatTokens(agyGeminiTotal)),
+                    h('span', { style: style.statsCalls }, fill(t('statsCalls'), { count: agyGeminiRow.calls || 0 })))),
+                agyClaudeTotal === null ? null : h('div', {
+                  key: '__agyClaude', style: style.statsRow, className: 'ofm-row', 'data-stats-agy': 'claude',
+                },
+                  h('span', { style: { ...style.stripe, background: '#D97757' } }),
+                  h('span', { style: style.statsNameCell },
+                    h('span', { style: style.statsName }, t('claudeName')),
+                    h('span', { style: style.meta }, breakdownText(agyClaudeRow))),
+                  h('span', { style: style.statsNumbers },
+                    h('span', { style: style.statsAmount }, formatTokens(agyClaudeTotal)),
+                    h('span', { style: style.statsCalls }, fill(t('statsCalls'), { count: agyClaudeRow.calls || 0 })))),
                 // 北辰：网关侧的上游，与 OFM 渠道同一套三桶；右侧小字给当天扣费。
                 beichenTotal === null ? null : h('div', {
                   key: '__beichen', style: style.statsRow, className: 'ofm-row', 'data-stats-beichen': 'row',
@@ -2918,6 +2959,12 @@ window.__ModuleLoader__.load({
        *   openKey / hiddenKey / attr
        */
       const agySectionOf = spec => {
+        // 今日 token：两个订阅栏各取自己模型族的用量，口径与 GPT 订阅栏一致
+        // （输入 + 缓存读 + 输出）。
+        const tokenRow = agy?.tokens === undefined || agy?.tokens === null
+          ? null : spec.family === 'google' ? agy.tokens.gemini : agy.tokens.claude
+        const tokenTotal = tokenRow === null || tokenRow === undefined
+          ? null : (tokenRow.input || 0) + (tokenRow.output || 0) + (tokenRow.cacheRead || 0)
         // 该池子的读数在「当前账号」上的那一行：折叠态标题栏只反映它。
         const rawFamily = agyStale ? null
           : agyActiveAccount?.families?.find(row => row.family === spec.family) ?? null
@@ -3035,8 +3082,29 @@ window.__ModuleLoader__.load({
               },
                 activeFamily.fiveHour === null ? null : chipOf(t('codexChipFiveHour'), activeFamily.fiveHour),
                 activeFamily.weekly === null ? null : chipOf(t('codexChipWeekly'), activeFamily.weekly)),
+            // 今日 token 跟在胶囊后面：两个百分比说明还剩多少，这个数说明用掉多少。
+            tokenTotal === null || tokenTotal <= 0 ? null : h('span', {
+              style: { ...style.wbSum, marginLeft: 2, fontSize: 10 },
+              'data-agy-tokens': spec.family,
+            }, formatTokens(tokenTotal)),
             caretOf(spec.open)),
-          // 展开区：按账号逐行排开，顶部那个账号排第一。
+          // 展开区：今日 token 先占一行，账号再逐行排开，顶部那个账号排第一。
+          !spec.open || tokenTotal === null || tokenTotal <= 0 ? null : h('div', {
+            style: { ...style.wbRow, paddingLeft: 18 },
+            className: 'ofm-row',
+            'data-agy-row': 'tokens',
+            'data-agy-family': spec.family,
+          },
+            h('span', { style: { ...style.stripe, height: 1, background: 'transparent' } }),
+            h('span', { style: style.wbNameCell },
+              h('span', { style: style.wbName }, t('agyTokensToday')),
+              h('span', { style: style.meta }, fill(t('agyTokensBreakdown'), {
+                input: formatTokens(tokenRow.input || 0),
+                output: formatTokens(tokenRow.output || 0),
+                cache: formatTokens(tokenRow.cacheRead || 0),
+              }))),
+            h('span', { style: { display: 'flex', alignItems: 'center' } }),
+            h('span', { style: style.wbAmount }, formatTokens(tokenTotal))),
           !spec.open ? null : (agy?.accounts ?? []).length === 0
             ? h('div', { style: style.wbEmpty }, t('agyNoAccounts'))
             : (agy?.accounts ?? []).map(account =>

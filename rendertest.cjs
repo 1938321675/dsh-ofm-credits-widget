@@ -418,6 +418,11 @@ check('收起时不显示配置面板',
 {
   const agyReading = {
     available: true, activeId: 'acc_a', stale: false, sampledAt: Date.now() - 60_000, ageMs: 60_000,
+    // 订阅限额同时带今日 token：Gemini 一栏、Claude 一栏各一份。
+    tokens: {
+      gemini: { input: 100, output: 50, cacheRead: 1000, calls: 4 },
+      claude: { input: 200, output: 80, cacheRead: 2000, calls: 5 },
+    },
     accounts: [
       {
         id: 'acc_a', alias: 'primary', email: 'a@example.com', planTier: 'pro',
@@ -481,6 +486,32 @@ check('收起时不显示配置面板',
   // 快照过期时两栏都退为提示，不显示旧百分比。
   const stale = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.agy]: { ...agyReading, stale: true } })
   check('快照过期时仍渲染两个分区', agyOf(stale) !== undefined && claudeOf(stale) !== undefined, true)
+
+  // 今日 token：折叠时标题栏给一个紧凑数，展开时再出一行三桶明细。
+  const agyTokenOf = tree => flatten(tree).find(node => node.props !== undefined && node.props['data-agy-tokens'] !== undefined)
+  const agyTokenRow = tree => flatten(tree).find(node => node.props !== undefined && node.props['data-agy-row'] === 'tokens')
+  check('折叠时标题栏给出 Gemini 今日 token',
+    agyTokenOf(collapsed)?.props['data-agy-tokens'], 'google')
+  // 两栏各自取自己的桶：Gemini 是 100+50+1000=1150，Claude 是 200+80+2000=2280。
+  check('折叠时 Gemini 栏标题栏给出 1150',
+    agyTokenOf(geminiTree)?.children?.[0], '1150')
+  check('折叠时 Claude 栏标题栏给出 2280',
+    agyTokenOf(claudeTree)?.children?.[0], '2280')
+  check('Gemini 栏展开后出今日 token 明细行',
+    agyTokenRow(geminiTree) !== undefined, true)
+  check('Claude 栏展开后也出今日 token 明细行',
+    agyTokenRow(claudeTree) !== undefined, true)
+  const agyTokenRowText = allText(agyTokenRow(geminiTree)).join(' ')
+  check('今日 token 明细行给三桶构成',
+    agyTokenRowText.includes('输入') && agyTokenRowText.includes('缓存'), true)
+  check('折叠时不出 token 明细行', agyTokenRow(collapsed), undefined)
+  // 两个栏各自取自己的桶：Gemini 栏显示 Gemini 的 1150，不显示 Claude 的 2280。
+  check('Gemini 栏只显示自己的用量', allText(geminiTree).join(' ').includes('1150'), true)
+  check('Gemini 栏不显示 Claude 的用量', allText(geminiTree).join(' ').includes('2280'), false)
+  // 订阅读数没带 token 字段时不显示，避免凭空出一行。
+  const noTokens = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.agy]: { ...agyReading, tokens: undefined } })
+  check('读数没有 token 字段时标题栏不给数', agyTokenOf(noTokens), undefined)
+  check('读数没有 token 字段时不展开明细行', agyTokenRow(noTokens), undefined)
 }
 
 
@@ -584,6 +615,50 @@ check('收起时不显示配置面板',
   check('顶部合计有 GPT 订阅一格', codexTexts.includes('GPT 订阅'), true)
   // 没有订阅用量时不出这一行，也不在合计里凭空加一格数字。
   check('没有 GPT 订阅用量时不列该行', flatten(stats).find(n => n.props !== undefined && n.props['data-stats-codex'] !== undefined), undefined)
+
+  // 两个订阅栏进统计：各占一格合计、各占一行明细，与 GPT 订阅并列。
+  const withAgy = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(),
+    [IDX.view]: 'stats',
+    [IDX.usage]: {
+      available: true,
+      days: [{
+        date: '2026-11-11',
+        ofm: { input: 100, output: 50, cacheRead: 1000, calls: 2 },
+        workbuddy: { input: 200, output: 80, cacheRead: 2000, calls: 3 },
+        byChannel: { trae: { input: 100, output: 50, cacheRead: 1000, calls: 2 } },
+        agyGemini: { input: 500, output: 40, cacheRead: 6000, calls: 6 },
+        agyClaude: { input: 700, output: 60, cacheRead: 8000, calls: 7 },
+      }],
+    },
+  })
+  const agyGeminiRow = flatten(withAgy).find(n => n.props !== undefined && n.props['data-stats-agy'] === 'gemini')
+  const agyClaudeRow = flatten(withAgy).find(n => n.props !== undefined && n.props['data-stats-agy'] === 'claude')
+  check('统计页列出 Gemini 订阅行', agyGeminiRow !== undefined, true)
+  check('统计页列出 Claude 订阅行', agyClaudeRow !== undefined, true)
+  const agyStatsTexts = allText(withAgy).join(' ')
+  // 两行的小字是各自的三桶；顶部合计里三桶把两条订阅线路一起算进去。
+  check('Gemini 订阅行给出三桶构成', agyStatsTexts.includes('入 500') && agyStatsTexts.includes('缓 6000'), true)
+  check('Claude 订阅行给出三桶构成', agyStatsTexts.includes('入 700') && agyStatsTexts.includes('缓 8000'), true)
+  check('顶部合计含两个订阅格', agyStatsTexts.includes('Gemini 订阅') && agyStatsTexts.includes('Claude 订阅'), true)
+  check('顶部三桶计入两条订阅线路',
+    agyStatsTexts.includes('输入 1500') && agyStatsTexts.includes('缓存命中 17k') && agyStatsTexts.includes('输出 230'), true)
+  check('顶部合计计入两条订阅线路',
+    (() => {
+      const cell = flatten(withAgy).find(n => n.props !== undefined && n.props['data-agy-gemini-token-total'] !== undefined)
+      const text = cell === undefined ? '' : allText(cell).join(' ')
+      return text.includes('6540')
+    })(), true)
+  // 没有订阅用量的那天，两行都不出现。
+  const noAgy = render({
+    [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.view]: 'stats',
+    [IDX.usage]: {
+      available: true,
+      days: [{ date: '2026-11-11', ofm: { input: 1, output: 1, cacheRead: 1, calls: 1 }, workbuddy: { input: 1, output: 1, cacheRead: 1, calls: 1 }, byChannel: {} }],
+    },
+  })
+  check('没有订阅用量时不列订阅行',
+    flatten(noAgy).filter(n => n.props !== undefined && (n.props['data-stats-agy'] === 'gemini' || n.props['data-stats-agy'] === 'claude')).length, 0)
 
   // 北辰进统计页：合计里算它，明细区单独一行，三桶构成照拆。
   const withBeichen = render({

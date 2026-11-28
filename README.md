@@ -36,18 +36,26 @@
   今日 token 由本插件自己的 llm/stream 采集器统计（订阅插件只回百分比，不带用量），
   统计界面按日列出订阅线路的 token 用量，与 OFM 渠道、WorkBuddy 并列；
   剩余 ≤10% 转红、≤25% 转黄，进度条同步变色，极低余量保底 3% 可见
-- **统一的视觉层级**：四个大栏标题栏各带一根身份色条与折叠三角（三角有旋转过渡），
+- **Gemini / Claude 订阅**：两个独立折叠分区，各对应 Antigravity 账号池的一个模型族。
+  折叠时标题栏给两个胶囊与今日 token 合计，展开后按账号逐行给进度条与百分比，
+  并在账号行上方多出一行今日 token 明细（输入 / 缓存命中 / 输出）。限额读 agy-link
+  落盘的账号池快照；今日 token 由本插件自己的 llm/stream 采集器统计，按模型名前缀归栏：
+  google 族（Gemini 4 系列与 Orchestrator）进 Gemini 栏，anthropic 族（Claude Opus /
+  Sonnet，以及同池的 GPT-OSS）进 Claude 栏，其余模型两栏都不进。统计界面按日各列一行，
+  与 OFM 渠道、WorkBuddy、GPT 订阅并列
+- **统一的视觉层级**：各栏标题栏各带一根身份色条与折叠三角（三角有旋转过渡），
   数据行悬停时淡蓝高亮，分区之间有分隔线；配色全部走 `--dsw-alias-*` 主题变量，
   明暗主题自动跟随
 - **OFM 模型今日 token**：独立分区，列出 OFM 十个账号渠道与免费车道当天的
   token 用量（本插件自己挂 llm/stream 采集），头部给合计；每行小字给出
   输入 / 缓存命中 / 输出三项
-- **大栏隐藏**：设置面板可勾选隐藏北辰 / GPT 订阅 / OFM 模型 / WorkBuddy
-  四个大栏
+- **大栏隐藏**：设置面板可勾选隐藏北辰 / GPT 订阅 / Gemini 订阅 / Claude 订阅 /
+  OFM 模型 / WorkBuddy 六个大栏
 - **token 统计界面**：标题栏的统计按钮把整张卡片切换到统计页，按日期查看每日用量。
-  顶部五格给合计、OFM 渠道、WorkBuddy、GPT 订阅与北辰，下面一行小字把合计拆成
-  输入 / 缓存命中 / 输出；明细区逐渠道列出当天用量，每行小字同样是三桶构成，
-  订阅线路与北辰各自单独占一行；末尾给 WorkBuddy 所有账号的累计积分消耗
+  顶部七格给合计、OFM 渠道、WorkBuddy、GPT 订阅、Gemini 订阅、Claude 订阅与北辰，
+  下面一行小字把合计拆成输入 / 缓存命中 / 输出；明细区逐渠道列出当天用量，每行小字
+  同样是三桶构成，GPT 订阅、两个订阅栏与北辰各自单独占一行；末尾给 WorkBuddy 所有
+  账号的累计积分消耗
 - **窗口可拉伸**：四个边、四个角都能拉，对边固定（跟 Windows 窗口一致），双击任一处复位
 - **高度跟随大栏**：折叠或展开北辰 / GPT 订阅 / OFM 模型 / WorkBuddy 任一大栏时，卡片高度回到随内容自适应，展开变高、折叠变矮；内容区最高 320px，超出部分在内容区滚动，卡片不铺满屏幕
 - **位置与尺寸记忆**：位置相对右下角保存，尺寸一并记住；窗口缩放后自动贴回并夹进视口
@@ -162,8 +170,9 @@ Key 的解析顺序（去重、空项忽略）：环境变量 `BEICHEN_API_KEYS`
 避免与会话日志的口径漂移，也不必去解析 zstd 多帧的会话文件。
 
 账本键是 `provider:model`。OFM 的十个渠道在账本里各是独立的 provider 前缀，WorkBuddy 是
-`workbuddy` 与 `workbuddy-global`（两个区域合并成一个数）。账本 1.7MB 量级，按 mtime + size
-做了一层缓存，面板轮询时命中缓存只 stat 一次文件。
+`workbuddy` 与 `workbuddy-global`（两个区域合并成一个数）。订阅线路同样走这张键：
+GPT 订阅是 `openai-codex`，Antigravity 的两个订阅栏共用 `antigravity`，靠模型名前缀归栏。
+账本 1.7MB 量级，按 mtime + size 做了一层缓存，面板轮询时命中缓存只 stat 一次文件。
 
 单个 token 数字的口径是 `输入 + 缓存读 + 输出`，与 cost-meter 面板一致。缓存读通常占大头
 （一次长对话能到输入输出的十几倍），把它单列会让「今天用了多少」反而没有答案。
@@ -179,6 +188,8 @@ Key 的解析顺序（去重、空项忽略）：环境变量 `BEICHEN_API_KEYS`
 - `wb-daily-YYYY-MM-DD.json` WorkBuddy 账号当日累计
 - `wb-total.json` WorkBuddy 账号累计消耗
 - `wb-last.json` WorkBuddy 账号上次采样的余额基准
+- `ofm-tokens-YYYY-MM-DD.json` 当日 token 用量，含 OFM 渠道、WorkBuddy、GPT 订阅
+  与两个订阅栏的桶；四个合计桶在文件里直接落键
 
 Host 不可用时（路由 404），浏览器退到 `localStorage` 的本地兜底账本。这只是降级：
 换浏览器或清缓存后会从头开始。
@@ -203,14 +214,15 @@ DSH 启动时自动加载。
 npm test
 ```
 
-四套离线测试，共 391 项检查：
+五套离线测试，共 581 项检查：
 
 | 文件 | 覆盖 |
 |------|------|
 | `selftest.cjs` | 格式化、单位识别、告警档位、过期时间、readChannel 归一、tooltip、位置解算、尺寸夹取、八向缩放几何、本地账本、并发上限、隐藏降频、失败时效、WorkBuddy 汇总、token 口径 |
-| `rendertest.cjs` | 组件渲染链路：行数、配置面板、当日列、告警档位、单位生效、失败行、账本回退、八向热区、WorkBuddy 分区、统计视图切换 |
-| `ledgertest.mjs` | 记账规则：下降才记、回升不计、失败不动基准、跨天不记、过旧不记、幂等、累加、脏数据、写盘节流、WorkBuddy 双口径、用量聚合与缓存 |
-| `routetest.mjs` | 真 HTTP：路径前缀、方法分派、body 解析、loopback 守卫、两套账本往返、用量路由 |
+| `rendertest.cjs` | 组件渲染链路：行数、配置面板、当日列、告警档位、单位生效、失败行、账本回退、八向热区、WorkBuddy 分区、订阅分区、统计视图切换 |
+| `ledgertest.mjs` | 记账规则：下降才记、回升不计、失败不动基准、跨天不记、过旧不记、幂等、累加、脏数据、写盘节流、WorkBuddy 双口径、用量聚合与缓存、订阅线路模型归栏、回填指纹去重 |
+| `routetest.mjs` | 真 HTTP：路径前缀、方法分派、body 解析、loopback 守卫、两套账本往返、用量路由、订阅限额响应 |
+| `beichentest.mjs` | 北辰多分组取数与合并 |
 
 账本测试通过 `OFM_CREDIT_WATCH_DIR` 指向临时目录，不会碰用户真实账本。
 

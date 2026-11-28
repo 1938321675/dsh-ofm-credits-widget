@@ -373,6 +373,33 @@ const WORKBUDDY_PROVIDERS = ['workbuddy', 'workbuddy-global']
  */
 const CODEX_PROVIDERS = ['openai-codex']
 
+/**
+ * Antigravity（agy CLI）的 provider id。
+ *
+ * Gemini 订阅与 Claude 订阅共用这一条线路：agy-link 把账号池按模型族分成
+ * google 与 anthropic 两个额度池，调用本身都经过宿主的 llm/stream，usage
+ * 块里只有 provider 与 model 能区分这笔用量该记在哪一栏。
+ */
+const AGY_PROVIDERS = ['antigravity']
+
+/** 两个订阅栏在账本里的槽位名，顺序即面板上的顺序。 */
+const AGY_BUCKETS = ['agyGemini', 'agyClaude']
+
+/**
+ * Antigravity 的模型归到哪一栏。
+ *
+ * google 组是 Gemini 4 系列与 Orchestrator，anthropic 组是 Claude Opus /
+ * Sonnet 与 GPT-OSS 120B。GPT-OSS 与 Claude 吃同一个池子的额度，按口径并入
+ * Claude 栏。其余模型不给归属：宁可少记，也不把来源不明的用量摊到某一栏。
+ */
+function agyBucketOf(model) {
+  const name = typeof model === 'string' ? model.toLowerCase() : ''
+  if (name === '') return null
+  if (name.startsWith('claude') || name.startsWith('gpt-oss')) return 'agyClaude'
+  if (name.startsWith('gemini')) return 'agyGemini'
+  return null
+}
+
 // ── 自带用量账本（不依赖 cost-meter）────────────────────────────────────────
 /**
  * 自己记一份 OFM 渠道的 token 用量。
@@ -415,18 +442,22 @@ function bucketsOf(usage) {
 const TOKEN_DEDUP_MS = 10_000
 const tokenSeen = new Map()
 
-function dedupToken(sessionId, provider, model, buckets, atMs) {
-  const fingerprint = JSON.stringify([sessionId ?? '', provider, model ?? '', buckets.input, buckets.output, buckets.cacheRead])
-  const previous = tokenSeen.get(fingerprint)
-  if (previous !== undefined && Math.abs(atMs - previous) < TOKEN_DEDUP_MS) return false
-  tokenSeen.set(fingerprint, atMs)
+function dedupInWindow(seen, fingerprint, atMs, windowMs = TOKEN_DEDUP_MS) {
+  const previous = seen.get(fingerprint)
+  if (previous !== undefined && Math.abs(atMs - previous) < windowMs) return false
+  seen.set(fingerprint, atMs)
   // 清掉过期指纹：这张表一分钟就能涨到几百条，不定期扫会一直涨。
-  if (tokenSeen.size > 512) {
-    for (const [key, at] of tokenSeen) {
-      if (Math.abs(atMs - at) >= TOKEN_DEDUP_MS) tokenSeen.delete(key)
+  if (seen.size > 2048) {
+    for (const [key, at] of seen) {
+      if (Math.abs(atMs - at) >= windowMs) seen.delete(key)
     }
   }
   return true
+}
+
+function dedupToken(sessionId, provider, model, buckets, atMs) {
+  const fingerprint = JSON.stringify([sessionId ?? '', provider, model ?? '', buckets.input, buckets.output, buckets.cacheRead])
+  return dedupInWindow(tokenSeen, fingerprint, atMs)
 }
 
 function recordTokenUsage(provider, model, sessionId, usage, atMs) {
@@ -434,7 +465,11 @@ function recordTokenUsage(provider, model, sessionId, usage, atMs) {
   const isOfm = OFM_PROVIDERS.includes(provider) || provider === 'our-free-model'
   const isWorkBuddy = WORKBUDDY_PROVIDERS.includes(provider)
   const isCodex = CODEX_PROVIDERS.includes(provider)
-  if (!isOfm && !isWorkBuddy && !isCodex) return
+  const isAgy = AGY_PROVIDERS.includes(provider)
+  if (!isOfm && !isWorkBuddy && !isCodex && !isAgy) return
+  // 两个订阅栏共用一条 Antigravity 线路，模型名决定这笔用量进哪一栏。
+  const agyBucket = isAgy ? agyBucketOf(model) : null
+  if (isAgy && agyBucket === null) return
   const buckets = bucketsOf(usage)
   if (buckets.input === 0 && buckets.output === 0 && buckets.cacheRead === 0) return
   if (!dedupToken(sessionId, provider, model, buckets, atMs)) return
@@ -444,12 +479,14 @@ function recordTokenUsage(provider, model, sessionId, usage, atMs) {
   const state = readJson(file, null)
   const record = state && state.date === date && typeof state.channels === 'object' && state.channels !== null
     ? state : { date, channels: {}, workbuddy: { input: 0, output: 0, cacheRead: 0, calls: 0 } }
-  // OFM 渠道逐渠道记；WorkBuddy 与 GPT 订阅各按一个合计桶记。
+  // OFM 渠道逐渠道记；WorkBuddy、GPT 订阅与两个订阅栏各按一个合计桶记。
   const target = isWorkBuddy
     ? (record.workbuddy ?? (record.workbuddy = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
     : isCodex
       ? (record.codex ?? (record.codex = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
-      : (record.channels[provider] ?? (record.channels[provider] = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
+      : isAgy
+        ? (record[agyBucket] ?? (record[agyBucket] = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
+        : (record.channels[provider] ?? (record.channels[provider] = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
   target.input += buckets.input
   target.output += buckets.output
   target.cacheRead += buckets.cacheRead
@@ -495,6 +532,8 @@ function readLocalTokenUsage() {
     available: true, day: date, channels, total, source: 'local',
     workbuddy: localBucketTotal(state, 'workbuddy'),
     codex: localBucketTotal(state, 'codex'),
+    agyGemini: localBucketTotal(state, 'agyGemini'),
+    agyClaude: localBucketTotal(state, 'agyClaude'),
   }
 }
 
@@ -585,12 +624,17 @@ function backfillTodayFromSessionLogs(sessionsRoot) {
   const dayStart = Date.parse(`${date}T00:00:00+08:00`)
   if (!Number.isFinite(dayStart)) return { updated: false, reason: 'no-day' }
   const rebuilt = {}
+  // 回填用独立的去重表：日志里同一次调用会留下多行 assistant/message，
+  // 逐行累加会把同一笔用量记成两遍。窗口与实时采集一致。
+  const backfillSeen = new Map()
   let scanned = 0
   for (const file of listSessionLogs(sessionsRoot)) {
     let info
     try { info = statSync(file) } catch { continue }
     if (info.mtimeMs < dayStart) continue
     scanned += 1
+    // 会话目录名就是 sessionId，指一起参与指纹，跨会话的相同用量不会被误并。
+    const sessionId = path.basename(path.dirname(file))
     let text
     try { text = decompressSessionLog(file) } catch { continue }
     for (const line of text.split('\n')) {
@@ -604,12 +648,18 @@ function backfillTodayFromSessionLogs(sessionsRoot) {
       const isCodex = CODEX_PROVIDERS.includes(provider)
       const isWorkBuddy = WORKBUDDY_PROVIDERS.includes(provider)
       const isOfm = OFM_PROVIDERS.includes(provider) || provider === 'our-free-model'
-      if (!isCodex && !isWorkBuddy && !isOfm) continue
+      const isAgy = AGY_PROVIDERS.includes(provider)
+      if (!isCodex && !isWorkBuddy && !isOfm && !isAgy) continue
       const time = Number(row?.time)
       if (!Number.isFinite(time) || time < dayStart) continue
-      const key = isCodex ? 'codex' : isWorkBuddy ? 'workbuddy' : provider
-      const bucket = rebuilt[key] ?? (rebuilt[key] = { input: 0, output: 0, cacheRead: 0, calls: 0 })
       const parsed = bucketsOf(usage)
+      if (parsed.input === 0 && parsed.output === 0 && parsed.cacheRead === 0) continue
+      const model = row?.data?.message?.source?.model ?? row?.data?.model
+      const key = isCodex ? 'codex' : isWorkBuddy ? 'workbuddy' : isAgy ? agyBucketOf(model) : provider
+      if (key === null) continue
+      const fingerprint = JSON.stringify([sessionId, key, parsed.input, parsed.output, parsed.cacheRead])
+      if (!dedupInWindow(backfillSeen, fingerprint, time)) continue
+      const bucket = rebuilt[key] ?? (rebuilt[key] = { input: 0, output: 0, cacheRead: 0, calls: 0 })
       bucket.input += parsed.input
       bucket.output += parsed.output
       bucket.cacheRead += parsed.cacheRead
@@ -624,7 +674,9 @@ function backfillTodayFromSessionLogs(sessionsRoot) {
     ? state : { date, channels: {}, workbuddy: { input: 0, output: 0, cacheRead: 0, calls: 0 } }
   let changed = false
   for (const [key, bucket] of Object.entries(rebuilt)) {
-    const target = key === 'codex' || key === 'workbuddy'
+    // 合计桶与 OFM 渠道分开存：codex / workbuddy / 两个订阅栏各是一条线路。
+    const direct = key === 'codex' || key === 'workbuddy' || AGY_BUCKETS.includes(key)
+    const target = direct
       ? (record[key] ?? (record[key] = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
       : (record.channels[key] ?? (record.channels[key] = { input: 0, output: 0, cacheRead: 0, calls: 0 }))
     // 只升不降：日志重建值更大说明有漏采，补上；更小说明日志不全，保留账本。
@@ -668,20 +720,30 @@ function mergeLocalDays(days) {
     }
     const wb = state.workbuddy
     if (wb !== null && typeof wb === 'object') addUsage(workbuddy, wb)
-    // GPT 订阅：独立一桶，统计页与订阅分区都用它。
+    // GPT 订阅与两个订阅栏：各自独立一桶，统计页与订阅分区都用它。
     const codex = emptyUsage()
     const cx = state.codex
     if (cx !== null && typeof cx === 'object') addUsage(codex, cx)
+    const agy = {}
+    for (const bucketKey of AGY_BUCKETS) {
+      agy[bucketKey] = emptyUsage()
+      const row = state[bucketKey]
+      if (row !== null && row !== undefined && typeof row === 'object') addUsage(agy[bucketKey], row)
+    }
     const existing = days.find(row => row.date === date)
-    if (existing === undefined) days.push({ date, ofm, workbuddy, byChannel, codex })
+    if (existing === undefined) days.push({ date, ofm, workbuddy, byChannel, codex, ...agy })
     else {
       existing.ofm = ofm
       existing.workbuddy = workbuddy
       existing.byChannel = byChannel
-      // codex 只在本地区账本真有记录时才覆盖：cost-meter 那边可能留着本插件
-      // 尚未采到的那一段历史，本地是空桶时把它抹成 0，统计页的 GPT 订阅
-      // 行就会凭空消失。
+      // 合计桶只在本地区账本真有记录时才覆盖：cost-meter 那边可能留着本插件
+      // 尚未采到的那一段历史，本地是空桶时把它抹成 0，统计页对应的行就会
+      // 凭空消失。
       if (codex.calls > 0 || codex.input + codex.output + codex.cacheRead > 0) existing.codex = codex
+      for (const bucketKey of AGY_BUCKETS) {
+        const row = agy[bucketKey]
+        if (row.calls > 0 || row.input + row.output + row.cacheRead > 0) existing[bucketKey] = row
+      }
     }
   }
 }
@@ -766,6 +828,7 @@ function readUsageStats() {
   const ofmSet = new Set(OFM_PROVIDERS)
   const wbSet = new Set(WORKBUDDY_PROVIDERS)
   const codexSet = new Set(CODEX_PROVIDERS)
+  const agySet = new Set(AGY_PROVIDERS)
   const days = []
   for (const [date, day] of Object.entries(ledger?.days ?? {})) {
     const rows = day?.byProviderModel
@@ -773,6 +836,7 @@ function readUsageStats() {
     const ofm = emptyUsage()
     const workbuddy = emptyUsage()
     const codex = emptyUsage()
+    const agy = { agyGemini: emptyUsage(), agyClaude: emptyUsage() }
     const byChannel = {}
     for (const [prefix, row] of Object.entries(rows)) {
       // 账本键是 `provider:model`；模型名里可能还有冒号，只切第一个。
@@ -783,12 +847,18 @@ function readUsageStats() {
       // 一个桶。订阅额度按百分比计、用量按 token 计，两者一起才说得清
       // 「这点余量是被多少 token 吃掉的」。
       if (codexSet.has(provider)) { addUsage(codex, row); continue }
+      // Antigravity 的两个订阅栏共用一条线路，账本里靠模型名归栏。
+      if (agySet.has(provider)) {
+        const bucket = agyBucketOf(colon === -1 ? '' : prefix.slice(colon + 1))
+        if (bucket !== null) addUsage(agy[bucket], row)
+        continue
+      }
       if (!ofmSet.has(provider)) continue
       addUsage(ofm, row)
       if (byChannel[provider] === undefined) byChannel[provider] = emptyUsage()
       addUsage(byChannel[provider], row)
     }
-    days.push({ date, ofm, workbuddy, byChannel, codex })
+    days.push({ date, ofm, workbuddy, byChannel, codex, ...agy })
   }
   mergeLocalDays(days)
   days.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
@@ -1574,6 +1644,21 @@ function agyFamiliesOf(quotas) {
 }
 
 /**
+ * 两个订阅栏的今日用量。
+ *
+ * 数据来自本插件自己的采集账本（llm/stream 实时记 + 启动回填），与 GPT
+ * 订阅栏同一口径：输入 + 缓存读 + 输出。没有调用时给全 0，界面据此显示 0
+ * 或者「今天还没用过」。
+ */
+function agyTokenTotals() {
+  const tokens = readLocalTokenUsage()
+  return {
+    gemini: tokens.agyGemini ?? emptyUsage(),
+    claude: tokens.agyClaude ?? emptyUsage(),
+  }
+}
+
+/**
  * 汇总 Antigravity 账号池的配额快照。
  *
  * 面板顶部固定显示「当前正在使用的账号」——`activeAccountIds.google` 指向
@@ -1586,7 +1671,7 @@ function readAgyQuota() {
     pool = JSON.parse(readFileSync(path.join(DSH_HOME, AGY_POOL_FILE), 'utf8'))
   } catch {
     // agy-link 没装或还没写过快照：返回 available:false，面板据此显示占位。
-    return { available: false, accounts: [], activeId: null, sampledAt: null, stale: false }
+    return { available: false, accounts: [], activeId: null, sampledAt: null, stale: false, tokens: agyTokenTotals() }
   }
   const raw = Array.isArray(pool?.accounts) ? pool.accounts : []
   const accounts = []
@@ -1621,7 +1706,7 @@ function readAgyQuota() {
     }
   }
   if (accounts.length === 0) {
-    return { available: false, accounts: [], activeId: null, sampledAt: null, stale: false }
+    return { available: false, accounts: [], activeId: null, sampledAt: null, stale: false, tokens: agyTokenTotals() }
   }
   const ageMs = sampledAt === null ? null : Math.max(0, Date.now() - sampledAt)
   // 与 GPT 订阅栏同一套判据：样本旧不等于读数失效。agy-link 只在真正有调用
@@ -1652,6 +1737,9 @@ function readAgyQuota() {
     // 样本偏旧但读数仍然有效（长期不用 Antigravity 时的常态）：界面照常显示，
     // 只在悬浮提示里注明采样时刻，而不是把数字藏起来。
     aged: ageMs !== null && ageMs > AGY_STALE_MS,
+    // 今日 token 跟限额一起回：额度按百分比算，光看「还剩 72%」不知道是被
+    // 多少 token 吃掉的。两个栏各一份。
+    tokens: agyTokenTotals(),
   }
 }
 
@@ -1832,5 +1920,6 @@ export const __test = {
   beichenFile, normalizeBeichenModels, mergeBeichenDays, mergeBeichenModels,
   readCodexQuota, readOfmTokenUsage, readAgyQuota, agyFamiliesOf,
   recordTokenUsage, readLocalTokenUsage, tokensFile, bucketsOf,
+  AGY_PROVIDERS, AGY_BUCKETS, agyBucketOf, agyTokenTotals, dedupInWindow,
   backfillTodayFromSessionLogs, listSessionLogs, decompressSessionLog, CODEX_PROVIDERS,
 }
