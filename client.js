@@ -286,6 +286,7 @@ window.__ModuleLoader__.load({
         codexTokensToday: '今日 token',
         codexTokensBreakdown: '输入 {input} · 输出 {output} · 缓存 {cache}',
         codexTipTokens: '　今日 {total} token（入 {input} / 出 {output} / 缓存 {cache}）',
+        codexTipReplenished: '　该窗口已翻篇，余量回到满额，重置时刻已顺延',
         agyName: 'Gemini 订阅',
         claudeName: 'Claude 订阅',
         agyFiveHour: '5 小时',
@@ -294,6 +295,7 @@ window.__ModuleLoader__.load({
         agyUnavailable: '未连接 Antigravity',
         agyStale: '快照已过期，等 agy-link 刷新',
         agyTipStale: '　快照停在上次刷新，等 agy-link 刷新后再看',
+        agyTipReplenished: '　该窗口已翻篇，余量回到满额，重置时刻已顺延',
         agyTipOther: '　其余 {count} 个账号',
         agyTipNoOther: '　没有其他账号',
         agyTipFiveHourReset: '　5 小时窗重置于 {when}（还有 {left}）',
@@ -420,6 +422,7 @@ window.__ModuleLoader__.load({
         codexTokensToday: 'Tokens today',
         codexTokensBreakdown: 'in {input} · out {output} · cache {cache}',
         codexTipTokens: '  {total} tokens today (in {input} / out {output} / cache {cache})',
+        codexTipReplenished: '  window reset; quota returned to full, reset time rolled forward',
         agyName: 'Gemini subscription',
         claudeName: 'Claude subscription',
         agyFiveHour: '5-hour',
@@ -428,6 +431,7 @@ window.__ModuleLoader__.load({
         agyUnavailable: 'Antigravity not connected',
         agyStale: 'snapshot expired, waiting for agy-link',
         agyTipStale: '  snapshot is from the last refresh, waiting for agy-link',
+        agyTipReplenished: '  window reset; quota returned to full, reset time rolled forward',
         agyTipOther: '  {count} other account(s)',
         agyTipNoOther: '  no other accounts',
         agyTipFiveHourReset: '  5-hour window resets at {when} ({left} left)',
@@ -2729,13 +2733,12 @@ window.__ModuleLoader__.load({
       // ── GPT 订阅分区 ────────────────────────────────────────────────────
       // 数据源是订阅插件落盘的预测快照（Host 侧读文件）：5 小时窗与周窗的
       // 剩余百分比。折叠栏给「5小时 63% · 本周 94%」，展开加重置时间。
-      // 快照过期：样本还停在上次采样那一刻。DSH 关了一夜之后，5 小时窗早就
-      // 翻过重置点，快照上那个百分比是上一轮的残留，直接显示会明显偏高。
-      // 这种时候按缺失处理，界面给占位，等订阅插件写进新样本再显示。
-      // 逐窗口判断，而不是整块按「样本有多旧」一起丢：
-      // 订阅长期不用时样本会很旧，但只要还没到该窗口的重置点，百分比就一直
-      // 有效——用掉的部分不会自己涨回去。真正作废的只有翻过了重置点的窗口，
-      // Host 侧已经逐条标好 expired，这里只把那些剔掉。
+      // 窗口翻过重置点：Host 侧已经把这一窗顺延为「已重置、目前满额」，
+      // 并把重置时刻滚到下一个窗口，所以它照常显示，不会因为快照陈旧而整窗消失。
+      // 逐窗口判断，而不是整块按「样本有多旧」一起丢：订阅长期不用时样本会很旧，
+      // 但只要还没到该窗口的重置点，百分比就一直有效——用掉的部分不会自己涨回去。
+      // 真正会被剔除的只有 Host 无法顺延的窗口（拿不到窗口周期），Host 已逐条
+      // 标好 expired，这里只把那些剔掉。
       const codexStale = codex?.stale === true
       const codexPick = kind => Array.isArray(codex?.windows)
         ? codex.windows.find(row => row.kind === kind && row.expired !== true) ?? null : null
@@ -2796,6 +2799,9 @@ window.__ModuleLoader__.load({
           line.push(left === ''
             ? t('codexTipResetNow')
             : fill(t('codexTipReset'), { when: whenOf(row.resetsAt), left }))
+          // Host 侧顺延过的窗口：余量是翻篇后的满额，提示里说明清楚，别让用户
+          // 误以为这是上一轮残留下来的旧读数。
+          if (row.replenished === true) line.push(t('codexTipReplenished'))
         }
         addRow(codexFiveHour, t('codexFiveHour'))
         addRow(codexWeekly, t('codexWeekly'))
@@ -2926,8 +2932,9 @@ window.__ModuleLoader__.load({
       // 「Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B」，两组读数逐字节
       // 相同。所以 Claude 栏只取 anthropic 一组，GPT-OSS 不单独立栏：
       // 再立一栏只会把同一份数字显示两遍，反而让人以为数量被翻倍了。
-      // 与 GPT 订阅栏同一套判据：样本旧不等于读数失效，只有翻过重置点的
-      // 那个窗口才作废。Host 侧已逐窗口标好 fiveHourExpired / weeklyExpired。
+      // 与 GPT 订阅栏同一套判据：样本旧不等于读数失效。窗口翻过重置点时，
+      // Host 侧已把该窗顺延为「已重置、目前满额」并滚到下一个窗口；只有无法
+      // 顺延的窗口才标 fiveHourExpired / weeklyExpired，这里把后者剔掉。
       const agyStale = agy?.stale === true
       const agyAged = agy?.aged === true && !agyStale
       /** 当前正在使用的账号：Host 侧已经按 activeAccountIds → primary 排过序。 */
@@ -2999,6 +3006,10 @@ window.__ModuleLoader__.load({
               }
               if (activeFamily.weeklyResetsAt !== null) {
                 line.push(agyWhenText(activeFamily.weeklyResetsAt, 'agyTipWeeklyReset'))
+              }
+              // Host 侧顺延过的窗口：余量是翻篇后的满额，提示里说明清楚。
+              if (activeFamily.fiveHourReplenished === true || activeFamily.weeklyReplenished === true) {
+                line.push(t('agyTipReplenished'))
               }
             }
             line.push(agyOtherCount === 0 ? t('agyTipNoOther') : fill(t('agyTipOther'), { count: agyOtherCount }))

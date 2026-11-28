@@ -1454,10 +1454,10 @@ const CODEX_WINDOWS = [
  * 藏起来换成「已过期」，等于在最需要它的时候把数据拿走了——恰恰是长时间没
  * 用、想先看一眼还剩多少再决定要不要开的时候。
  *
- * 真正会失效的只有一种情况：快照停在了上次关机那一刻，之后窗口翻过了重置点。
- * 那时旧百分比是上一轮的残留，拿来显示会明显偏高。所以逐窗口比较 resetsAt：
- * 已经过了重置点就意味着这一窗的数字作废（重置后余量回到满额，但重置后的
- * 实际消耗本插件无从得知，只能等新样本）。
+ * 需要单独处理的是快照停在了上次关机那一刻、之后窗口翻过重置点的情况。旧
+ * 百分比确实是上一轮的残留，但窗口内的额度在重置点已经回到满额——这是确定
+ * 的事实。所以逐窗口比较 resetsAt：过了重置点就把重置时刻顺延一个窗口，余量
+ * 呈现满额，界面继续显示「已重置、目前满额」，而不是把这一窗整块藏起来。
  *
  * 另加一个宽松的上限兜底：样本再旧也不该超过一个 5 小时窗口还没更新过，
  * 超过说明订阅插件确实停摆了，但这种情况下面板也不该空着——照常显示读数，
@@ -1488,18 +1488,29 @@ function readCodexQuota() {
     const matched = CODEX_WINDOWS.find(row => row.key === seconds)
     const resetsAt = Number.isFinite(Number(record?.resetsAt)) ? Number(record.resetsAt) * 1000 : null
     const sampledAt = last === null ? null : Number(last.at)
-    // 采样之后窗口翻过了重置点：旧百分比属于上一轮，不能当作「现在还剩」。
     // 没有 resetsAt 时无从判断，只能按未失效处理（读数本身仍是最后一次真实值）。
-    const expired = resetsAt !== null && sampledAt !== null && resetsAt > sampledAt && resetsAt <= Date.now()
+    // 窗口翻过了重置点：额度已经回到满额，这是确定的事实，不是「作废等新样本」。
+    // 顺延重置时间到下一个窗口，直接呈现「已重置、目前满额」——否则窗口一重置就
+    // 把它藏起来，订阅长期不用时 5 小时窗会一直看不到。只有拿不到窗口周期
+    // （seconds 为 0）时无法顺延，才保留作废判定。
+    const reset = resetsAt !== null && sampledAt !== null && resetsAt > sampledAt && resetsAt <= Date.now()
+    const periodMs = seconds > 0 ? seconds * 1000 : null
+    let nextReset = resetsAt
+    let replenished = false
+    if (reset && periodMs !== null && Number.isFinite(nextReset)) {
+      while (nextReset <= Date.now()) nextReset += periodMs
+      replenished = true
+    }
     windows.push({
       scope,
       limitId,
       windowSeconds: seconds,
       kind: matched?.label ?? (seconds < 3600 * 24 ? 'short' : 'long'),
-      remainingPercent: Math.max(0, Math.min(100, remaining)),
-      resetsAt,
+      remainingPercent: replenished ? 100 : Math.max(0, Math.min(100, remaining)),
+      resetsAt: nextReset,
       sampledAt,
-      expired,
+      replenished,
+      expired: reset && !replenished,
     })
   }
   // 只留 codex 主限额：scope 取最新样本的那一组，其余（code_review 等）不进面板。
@@ -1599,6 +1610,10 @@ const AGY_POOL_FILE = 'agy-accounts/pool.json'
  * 窗口有没有翻篇，不是样本时间；老样本只在悬浮提示里注明采样时刻。
  */
 const AGY_STALE_MS = 15 * 60 * 1000
+
+/** 5 小时窗与周窗的周期，窗口翻过重置点时用来顺延重置时刻。 */
+const AGY_FIVE_HOUR_MS = 5 * 60 * 60 * 1000
+const AGY_WEEKLY_MS = 7 * 24 * 60 * 60 * 1000
 
 /** 模型族 → 面板上的显示名。顺序即展开后的行顺序，Gemini 在前。 */
 const AGY_FAMILIES = [
@@ -1716,10 +1731,26 @@ function readAgyQuota() {
   const nowMs = Date.now()
   for (const account of accounts) {
     for (const family of account.families) {
-      for (const [pctKey, resetKey] of [['fiveHour', 'fiveHourResetsAt'], ['weekly', 'weeklyResetsAt']]) {
+      for (const [pctKey, resetKey, periodMs] of [
+        ['fiveHour', 'fiveHourResetsAt', AGY_FIVE_HOUR_MS],
+        ['weekly', 'weeklyResetsAt', AGY_WEEKLY_MS],
+      ]) {
         const resetAt = family[resetKey]
         const sampled = family.updatedAt
-        family[`${pctKey}Expired`] = resetAt !== null && sampled !== null && resetAt > sampled && resetAt <= nowMs
+        const reset = resetAt !== null && sampled !== null && resetAt > sampled && resetAt <= nowMs
+        if (reset && Number.isFinite(resetAt) && Number.isFinite(periodMs)) {
+          // 窗口翻过重置点：额度已经回到满额，顺延重置时刻呈现「已重置、目前满额」，
+          // 而不是把这一窗整块藏起来等 agy-link 下次刷新。长期不用 Antigravity 时，
+          // 快照会一直停在翻篇前，整窗消失会让栏里只剩周窗。
+          let next = resetAt
+          while (next <= nowMs) next += periodMs
+          family[resetKey] = next
+          family[pctKey] = 100
+          family[`${pctKey}Replenished`] = true
+          family[`${pctKey}Expired`] = false
+        } else {
+          family[`${pctKey}Expired`] = reset
+        }
       }
     }
   }

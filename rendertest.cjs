@@ -275,6 +275,38 @@ check('展开 GPT 分区后两行限额',
 check('隐藏 GPT 栏后分区不渲染',
   hasCodex(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.codex]: codexReading, [IDX.hiddenSections]: new Set(['codex']) })), false)
 
+  // 翻篇顺延的窗口照常显示：Host 侧已把重置时刻顺延、余量标为满额，界面不再把
+  // 这一窗整块藏起来，悬浮提示里说明它是翻篇后的读数。
+  const codexReplenished = {
+    available: true,
+    windows: [
+      { kind: 'fiveHour', remainingPercent: 100, resetsAt: Date.now() + 3_600_000, sampledAt: Date.now() - 10 * 60 * 60 * 1000, replenished: true },
+      { kind: 'weekly', remainingPercent: 94, resetsAt: Date.now() + 7 * 24 * 60 * 60 * 1000, sampledAt: Date.now() - 10 * 60 * 60 * 1000 },
+    ],
+  }
+  const codexReplenishedTree = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.codex]: codexReplenished, [IDX.codexOpen]: true })
+  check('翻篇顺延后 GPT 分区仍显示两行限额', countCodexRows(codexReplenishedTree), 2)
+  const codexReplenishedHead = flatten(codexReplenishedTree).find(n => n.props !== undefined && n.props.className === 'ofm-head')
+  check('翻篇顺延的窗口在悬浮提示里说明', String(codexReplenishedHead?.props?.title ?? '').includes('翻篇'), true)
+
+  // agy 侧同样：翻篇的窗口顺延为满额，账号行继续显示，标题栏仍给 100%。
+  const agyReplenished = {
+    available: true, activeId: 'acc_a', stale: false, sampledAt: Date.now() - 60_000, ageMs: 60_000,
+    tokens: { gemini: { input: 0, output: 0, cacheRead: 0, calls: 0 }, claude: { input: 0, output: 0, cacheRead: 0, calls: 0 } },
+    accounts: [{
+      id: 'acc_a', alias: 'primary', email: 'a@example.com', planTier: 'pro',
+      families: [
+        { family: 'google', label: 'Gemini', fiveHour: 100, fiveHourResetsAt: Date.now() + 3_600_000, fiveHourReplenished: true, fiveHourExpired: false,
+          weekly: 95, weeklyResetsAt: Date.now() + 86_400_000, updatedAt: Date.now() },
+        { family: 'anthropic', label: 'Claude', fiveHour: 98, fiveHourResetsAt: Date.now() + 3_600_000, weekly: 99, weeklyResetsAt: Date.now() + 86_400_000, updatedAt: Date.now() },
+      ],
+    }],
+  }
+  const agyReplenishedTree = render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.agy]: agyReplenished, [IDX.agyOpen]: true })
+  const agyReplenishedHead = flatten(agyReplenishedTree).find(n => n.props !== undefined && n.props.className === 'ofm-head')
+  check('翻篇顺延的 Gemini 栏标题栏仍给 100%', allText(agyReplenishedTree).join(' ').includes('100%'), true)
+  check('翻篇顺延的窗口在 agy 悬浮提示里说明', String(agyReplenishedHead?.props?.title ?? '').includes('翻篇'), true)
+
 check('OFM 读数到达后出现分区',
   hasOfm(render({ [IDX.rows]: fullRows(), [IDX.hiddenIds]: new Set(), [IDX.ofmTokens]: ofmReading })), true)
 

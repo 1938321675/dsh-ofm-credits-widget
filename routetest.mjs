@@ -277,19 +277,25 @@ async function main() {
       check('窗口未翻篇时两个读数都可用', old.live, 2)
       check('窗口未翻篇时仍给出余量', old.windows.map(row => Math.round(row.remainingPercent)), [73, 88])
 
-      // 5 小时窗已翻过重置点：这一窗作废，周窗仍有效，整体不算过期。
+      // 5 小时窗已翻过重置点：该窗顺延为满额，周窗照常有效，整体不算过期。
       writeForecast(7200, 7200, -60, 86400 * 3)
       const half = await readQuota()
       checkTrue('单窗翻篇时整体仍可用', half.stale === false)
-      check('单窗翻篇后只剩一个有效窗口', half.live, 1)
-      check('翻篇的窗口被标 expired', half.windows.find(row => row.kind === 'fiveHour').expired, true)
-      check('未翻篇的窗口不被标 expired', half.windows.find(row => row.kind === 'weekly').expired, false)
+      check('单窗翻篇后两个窗口都可用', half.live, 2)
+      const fiveRow = half.windows.find(row => row.kind === 'fiveHour')
+      check('翻篇的窗口标记为顺延', fiveRow.replenished, true)
+      check('翻篇的窗口余量回到满额', fiveRow.remainingPercent, 100)
+      check('翻篇的窗口不再标 expired', fiveRow.expired, false)
+      checkTrue('翻篇窗口的重置时刻已顺延到未来', fiveRow.resetsAt > Date.now())
+      check('未翻篇的窗口不被顺延', half.windows.find(row => row.kind === 'weekly').replenished, false)
 
-      // 两个窗口都翻过重置点：这时才真的没有可用读数，界面该给占位。
+      // 两个窗口都翻过重置点：两窗都顺延为满额，界面照常显示，不因快照陈旧而空着。
       writeForecast(7200, 7200, -60, -60)
       const dead = await readQuota()
-      checkTrue('两个窗口都翻篇时判过期', dead.stale === true)
-      check('两个窗口都翻篇时没有有效读数', dead.live, 0)
+      checkTrue('两个窗口都翻篇时整体仍可用', dead.stale === false)
+      check('两个窗口都翻篇时两窗都顺延为满额', dead.windows.map(row => row.remainingPercent), [100, 100])
+      checkTrue('两个窗口的重置时刻都顺延到未来',
+        dead.windows.every(row => Number.isFinite(row.resetsAt) && row.resetsAt > Date.now()))
     } finally {
       fs.rmSync(path.join(temp, 'state'), { recursive: true, force: true })
     }
@@ -334,6 +340,38 @@ async function main() {
     checkTrue('agy 读数带 Gemini 栏 token', body.tokens && body.tokens.gemini && body.tokens.gemini.input === 100)
     checkTrue('agy 读数带 Claude 栏 token', body.tokens && body.tokens.claude && body.tokens.claude.input === 200)
     checkTrue('agy 读数带账号池', Array.isArray(body.accounts) && body.accounts.length === 1)
+
+    // 5 小时窗已翻过重置点：顺延为满额，界面继续显示，而不是整窗消失。
+    // 样本停在重置点之前（updatedAt 早于 resetTime），这样快照里的百分比是
+    // 重置前的残留，正是需要顺延处理的情形。
+    const pastReset = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString()
+    const beforeReset = Date.now() - 7 * 60 * 60 * 1000
+    fs.writeFileSync(path.join(poolDir, 'pool.json'), JSON.stringify({
+      version: 1,
+      accounts: [{
+        id: 'acc_a', alias: 'primary', email: 'a@example.com', planTier: 'pro', enabled: true,
+        quotas: {
+          google: {
+            remainingFraction: 0.2, resetTime: pastReset,
+            weeklyFraction: 0.8, weeklyResetTime: '2099-01-08T00:00:00Z', description: '', updatedAt: beforeReset,
+          },
+          anthropic: {
+            weeklyFraction: 0.9, weeklyResetTime: '2099-01-08T00:00:00Z', description: '', updatedAt: Date.now(),
+          },
+        },
+      }],
+      primaryAccountId: 'acc_a',
+      activeAccountIds: { google: 'acc_a', anthropic: 'acc_a' },
+      lastActiveAccountId: 'acc_a',
+    }), 'utf8')
+    const replenished = await fetch(base + '/agy')
+    const replenishedBody = await replenished.json()
+    const geminiFamily = replenishedBody.accounts[0].families.find(row => row.family === 'google')
+    check('agy 翻篇窗口余量回到满额', geminiFamily.fiveHour, 100)
+    check('agy 翻篇窗口标记顺延', geminiFamily.fiveHourReplenished, true)
+    check('agy 翻篇窗口不再标失效', geminiFamily.fiveHourExpired, false)
+    checkTrue('agy 翻篇窗口的重置时刻顺延到未来', geminiFamily.fiveHourResetsAt > Date.now())
+    check('agy 周窗不受 5 小时窗翻篇影响', geminiFamily.weekly, 80)
 
     fs.rmSync(poolDir, { recursive: true, force: true })
     fs.rmSync(path.join(temp, 'ofm-tokens-' + date + '.json'), { force: true })
